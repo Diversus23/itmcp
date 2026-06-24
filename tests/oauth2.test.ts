@@ -1,9 +1,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import { OAuth2Service, OAuth2Store } from "../src/auth/oauth2.js";
 
 function makePair(graceWindowMs = 60_000) {
@@ -17,8 +16,16 @@ function challengeFor(verifier: string): string {
   return createHash("sha256").update(verifier, "ascii").digest("base64url");
 }
 
-function tmpSnapshotPath(): string {
-  return join(tmpdir(), `oauth2-test-${randomUUID()}.json`);
+/**
+ * Создаёт уникальный временный каталог (атомарно, с правами 0700) и возвращает
+ * путь к файлу снапшота внутри него вместе с функцией очистки.
+ */
+async function makeSnapshotFile(): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const dir = await mkdtemp(join(tmpdir(), "oauth2-test-"));
+  return {
+    path: join(dir, "snapshot.json"),
+    cleanup: () => rm(dir, { recursive: true, force: true }),
+  };
 }
 
 describe("OAuth2Service — PKCE", () => {
@@ -148,7 +155,7 @@ describe("OAuth2Service — refresh-ротация и grace-window", () => {
 
 describe("OAuth2Store — персистентность снапшота", () => {
   it("сохраняет и восстанавливает токены через снапшот", async () => {
-    const path = tmpSnapshotPath();
+    const { path, cleanup } = await makeSnapshotFile();
     try {
       const store = new OAuth2Store({ persistencePath: path });
       const svc = new OAuth2Service(store, 120, 3600, 1_209_600);
@@ -169,12 +176,12 @@ describe("OAuth2Store — персистентность снапшота", () =
       });
       expect(svc2.refreshTokens(tokens.refreshToken).kind).toBe("ok");
     } finally {
-      await rm(path, { force: true });
+      await cleanup();
     }
   });
 
   it("отбрасывает истёкшие записи при загрузке", async () => {
-    const path = tmpSnapshotPath();
+    const { path, cleanup } = await makeSnapshotFile();
     try {
       const now = Date.now();
       const payload = {
@@ -195,23 +202,28 @@ describe("OAuth2Store — персистентность снапшота", () =
       expect(svc.validateAccessToken("valid")).toEqual({ login: "a", password: "b" });
       expect(svc.validateAccessToken("expired")).toBeUndefined();
     } finally {
-      await rm(path, { force: true });
+      await cleanup();
     }
   });
 
   it("игнорирует повреждённый снапшот без выброса исключения", async () => {
-    const path = tmpSnapshotPath();
+    const { path, cleanup } = await makeSnapshotFile();
     try {
       await writeFile(path, "{ this is not json", "utf8");
       const store = new OAuth2Store({ persistencePath: path });
       await expect(store.loadSnapshot()).resolves.toBeUndefined();
     } finally {
-      await rm(path, { force: true });
+      await cleanup();
     }
   });
 
   it("молча стартует с пустым хранилищем при отсутствии файла", async () => {
-    const store = new OAuth2Store({ persistencePath: tmpSnapshotPath() });
-    await expect(store.loadSnapshot()).resolves.toBeUndefined();
+    const { path, cleanup } = await makeSnapshotFile();
+    try {
+      const store = new OAuth2Store({ persistencePath: path });
+      await expect(store.loadSnapshot()).resolves.toBeUndefined();
+    } finally {
+      await cleanup();
+    }
   });
 });

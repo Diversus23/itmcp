@@ -6,7 +6,7 @@
  * из @modelcontextprotocol/node (см. docs/migration.md в SDK).
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -111,8 +111,10 @@ async function validateOneCCredentials(
  * Снижает шторм health-check'ов при параллельных OAuth-запросах от
  * клиента и при ретраях после кратковременной недоступности 1С.
  *
- * Ключ кэша = sha256(login + ":" + password) — пароль в чистом виде
- * в мапе не хранится.
+ * Ключ кэша = HMAC-SHA256(login + ":" + password) с разовой солью на время
+ * жизни процесса — пароль в чистом виде в мапе не хранится и не может быть
+ * восстановлен из ключа даже при дампе памяти. Это идентификатор кэша, а не
+ * хранилище паролей: KDF здесь не нужен (и убил бы смысл кэша).
  *
  * Лимит размера: lazy cleanup протухших записей + жёсткий FIFO-кап.
  * Map в JavaScript сохраняет порядок вставки, так что при превышении
@@ -120,9 +122,11 @@ async function validateOneCCredentials(
  */
 function createCachedValidator(config: Config) {
   const cache = new Map<string, { result: CredentialValidationResult; exp: number }>();
+  // Соль живёт только в памяти процесса и не персистится.
+  const keySalt = randomBytes(32);
 
   return async (username: string, password: string): Promise<CredentialValidationResult> => {
-    const key = createHash("sha256").update(`${username}:${password}`).digest("hex");
+    const key = createHmac("sha256", keySalt).update(`${username}:${password}`).digest("hex");
     const now = Date.now();
     const cached = cache.get(key);
 
