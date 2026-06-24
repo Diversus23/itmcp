@@ -87,9 +87,7 @@ export function getConfig(): Config {
   };
 
   // Удаляем undefined значения, чтобы zod использовал defaults
-  const cleaned = Object.fromEntries(
-    Object.entries(raw).filter(([, v]) => v !== undefined)
-  );
+  const cleaned = Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== undefined));
 
   return configSchema.parse(cleaned);
 }

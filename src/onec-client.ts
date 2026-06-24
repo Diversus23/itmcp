@@ -88,11 +88,10 @@ export class OneCClient {
     username: string,
     password: string,
     serviceRoot: string = "mcp",
-    timeout: number = 120_000
+    timeout: number = 120_000,
   ) {
     this.serviceBaseUrl = OneCClient.buildServiceUrl(baseUrl, serviceRoot);
-    this.authHeader =
-      "Basic " + Buffer.from(`${username}:${password}`).toString("base64");
+    this.authHeader = "Basic " + Buffer.from(`${username}:${password}`).toString("base64");
     this.timeout = timeout;
 
     // Кешируем разобранные URL для повторного использования
@@ -125,14 +124,14 @@ export class OneCClient {
 
   private async request(
     path: string,
-    options: { method?: string; body?: string } = {}
+    options: { method?: string; body?: string } = {},
   ): Promise<Dispatcher.ResponseData> {
     this.ensureOpen();
 
     return this.agent.request({
       origin: this.originUrl,
       path,
-      method: (options.method ?? "GET") as Dispatcher.HttpMethod,
+      method: options.method ?? "GET",
       headers: {
         authorization: this.authHeader,
         "content-type": "application/json",
@@ -158,9 +157,7 @@ export class OneCClient {
       return true;
     }
 
-    throw new Error(
-      `1C service reported not healthy: ${JSON.stringify(json)}`
-    );
+    throw new Error(`1C service reported not healthy: ${JSON.stringify(json)}`);
   }
 
   private nextRpcId(): number {
@@ -169,7 +166,7 @@ export class OneCClient {
 
   async callRpc(
     method: string,
-    params: Record<string, unknown> = {}
+    params: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> {
     const rpcRequest: JsonRpcRequest = {
       jsonrpc: "2.0",
@@ -199,9 +196,7 @@ export class OneCClient {
     }
 
     if (rpcResponse.error) {
-      throw new Error(
-        `JSON-RPC ошибка ${rpcResponse.error.code}: ${rpcResponse.error.message}`
-      );
+      throw new Error(`JSON-RPC ошибка ${rpcResponse.error.code}: ${rpcResponse.error.message}`);
     }
 
     return rpcResponse.result ?? {};
@@ -230,7 +225,7 @@ export class OneCClient {
 
   async callTool(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
   ): Promise<{ content: ContentItem[]; isError: boolean }> {
     const result = await this.callRpc("tools/call", {
       name,
@@ -249,10 +244,8 @@ export class OneCClient {
             mimeType: item.mimeType ?? "image/png",
           });
         } else {
-          logger.warning(
-            `Неизвестный тип контента: ${item.type}, обрабатываем как текст`
-          );
-          content.push({ type: "text", text: String(item.text ?? item) });
+          logger.warning(`Неизвестный тип контента: ${item.type}, обрабатываем как текст`);
+          content.push({ type: "text", text: item.text ?? JSON.stringify(item) });
         }
       }
     }
@@ -337,7 +330,7 @@ export class OneCClient {
 
   async getPrompt(
     name: string,
-    args: Record<string, string> = {}
+    args: Record<string, string> = {},
   ): Promise<{ description: string; messages: PromptMessage[] }> {
     const result = await this.callRpc("prompts/get", {
       name,
@@ -370,7 +363,7 @@ export class OneCClient {
    */
   async downloadFile(
     fileRefId: string,
-    destPath?: string
+    destPath?: string,
   ): Promise<{ path: string; size: number; mimeType: string; filename: string }> {
     this.ensureOpen();
 
@@ -401,7 +394,7 @@ export class OneCClient {
     let filename = fileRefId;
     if (contentDisposition) {
       const match = contentDisposition.match(/filename="([^"]+)"/);
-      if (match) {
+      if (match?.[1]) {
         filename = match[1];
       }
     }

@@ -420,7 +420,7 @@ node dist/index.js --help
 ## Разработка
 
 ```bash
-# Установка зависимостей
+# Установка зависимостей (заодно ставит git-хуки через husky)
 npm install
 
 # Сборка
@@ -435,6 +435,26 @@ npm start
 # Запуск HTTP
 npm run start:http
 ```
+
+### Контроль качества
+
+```bash
+npm run typecheck      # проверка типов без сборки
+npm run lint           # ESLint
+npm run lint:fix       # ESLint с автоисправлением
+npm run format         # Prettier: отформатировать
+npm run format:check   # Prettier: только проверка
+npm test               # запуск тестов (Vitest)
+npm run test:watch     # тесты в watch-режиме
+npm run test:coverage  # тесты с отчётом о покрытии
+npm run check          # format:check + lint + typecheck + test (как в CI)
+```
+
+Перед каждым коммитом `husky` + `lint-staged` автоматически прогоняют ESLint
+и Prettier по изменённым файлам. CI (GitHub Actions) дополнительно проверяет
+сборку на Node 22 и 24, собирает Docker-образ и запускает CodeQL.
+
+История изменений — в [CHANGELOG.md](CHANGELOG.md).
 
 ---
 

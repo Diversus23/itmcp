@@ -28,8 +28,8 @@ export async function runStdioServer(config: Config): Promise<void> {
     logger.info("Получен сигнал завершения, закрытие stdio сервера...");
     await server.close();
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 
   try {
     await server.connect(transport);

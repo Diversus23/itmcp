@@ -34,7 +34,7 @@ export async function prefetchInstructions(config: Config): Promise<string | und
       config.onecUsername,
       config.onecPassword,
       config.onecServiceRoot,
-      config.onecTimeout
+      config.onecTimeout,
     );
     try {
       const initResult = await client.initialize();
@@ -44,7 +44,7 @@ export async function prefetchInstructions(config: Config): Promise<string | und
       await client.close();
     }
   } catch (e) {
-    logger.warning(`Не удалось получить instructions из 1С: ${e}`);
+    logger.warning(`Не удалось получить instructions из 1С: ${formatError(e)}`);
     return undefined;
   }
 }
@@ -72,7 +72,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
     username,
     password,
     config.onecServiceRoot,
-    config.onecTimeout
+    config.onecTimeout,
   );
 
   // Проверяем подключение к 1С при создании сессии
@@ -89,7 +89,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
         onInstructionsFetched?.(resolvedInstructions);
       }
     } catch (e) {
-      logger.warning(`Не удалось получить instructions: ${e}`);
+      logger.warning(`Не удалось получить instructions: ${formatError(e)}`);
     }
   }
 
@@ -103,19 +103,17 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
         logging: {},
       },
       instructions: resolvedInstructions,
-    }
+    },
   );
 
   // Lowlevel Server для регистрации динамических обработчиков
   const server = mcpServer.server;
 
-  logger.debug(
-    `Создан MCP-прокси, URL: ${config.onecUrl}`
-  );
+  logger.debug(`Создан MCP-прокси, URL: ${config.onecUrl}`);
 
-  // Закрытие клиента при закрытии сервера
-  server.onclose = async () => {
-    await client.close();
+  // Закрытие клиента при закрытии сервера (onclose ожидает void-колбэк)
+  server.onclose = () => {
+    void client.close();
   };
 
   // --- Tools ---
@@ -146,7 +144,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
   };
 
   server.setRequestHandler(ListToolsRequestSchema, async (request) => {
-    const cursor = request.params?.cursor as string | undefined;
+    const cursor = request.params?.cursor;
     const { tools, nextCursor } = await client.listTools(cursor);
     tools.push(saveFileTool);
     logger.debug(`Получено инструментов: ${tools.length}`);
@@ -163,7 +161,9 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
 
         if (!fileId) {
           return {
-            content: [{ type: "text" as const, text: JSON.stringify({ error: "file_id is required" }) }],
+            content: [
+              { type: "text" as const, text: JSON.stringify({ error: "file_id is required" }) },
+            ],
             isError: true,
           };
         }
@@ -199,7 +199,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
   // --- Resources ---
 
   server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
-    const cursor = request.params?.cursor as string | undefined;
+    const cursor = request.params?.cursor;
     const { resources, nextCursor } = await client.listResources(cursor);
     logger.debug(`Получено ресурсов: ${resources.length}`);
     return { resources, nextCursor };
@@ -224,7 +224,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
   // --- Prompts ---
 
   server.setRequestHandler(ListPromptsRequestSchema, async (request) => {
-    const cursor = request.params?.cursor as string | undefined;
+    const cursor = request.params?.cursor;
     const { prompts, nextCursor } = await client.listPrompts(cursor);
     logger.debug(`Получено промптов: ${prompts.length}`);
     return { prompts, nextCursor };

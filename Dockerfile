@@ -2,9 +2,11 @@ FROM node:22-slim AS builder
 
 WORKDIR /app
 
-# Копируем файлы зависимостей и устанавливаем
+# Копируем файлы зависимостей и устанавливаем.
+# --ignore-scripts: пропускаем lifecycle-скрипты (в т.ч. prepare/husky) —
+# в образе нет .git и dev-инструментов хуков, сборка их не требует.
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 # Копируем исходный код и собираем
 COPY tsconfig.json ./
@@ -17,7 +19,7 @@ FROM node:22-slim
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 
 COPY --from=builder /app/dist ./dist/
 
