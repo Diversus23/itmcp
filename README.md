@@ -95,22 +95,30 @@ node dist/index.js http --port 8000
 
 Запуск в контейнере для изоляции и упрощения развертывания.
 
-**Быстрый старт:**
+#### Первичная установка
+
 ```bash
-# 1. Скопировать конфигурацию
+# 1. Клонируем репозиторий
+git clone https://github.com/Diversus23/itmcp.git
+
+# 2. Переходим в папку, где находится клонированный itmcp
+cd itmcp
+
+# 3. Скопировать конфигурацию
 cp .env.docker.example .env
 
-# 2. Отредактировать .env (обязательно: MCP_ONEC_URL, MCP_ONEC_USERNAME, MCP_ONEC_PASSWORD)
+# 4. Отредактировать .env (обязательно: MCP_ONEC_URL, MCP_ONEC_USERNAME, MCP_ONEC_PASSWORD)
 
-# 3. Запустить через docker-compose
-docker-compose build --no-cache
-docker-compose up -d
+# 5. Запустить через docker compose
+docker compose build --no-cache
+docker compose up -d
 
-# Проверка
+# 6. Проверка, что все работает
 curl http://localhost:8000/health
 ```
 
 **Или напрямую через Docker:**
+
 ```bash
 # Сборка образа
 docker build -t 1c-mcp-proxy .
@@ -126,17 +134,38 @@ docker run -d \
 ```
 
 **Важно про сеть:**
+
 - Если 1С на **том же хосте**: используйте `host.docker.internal` (Mac/Windows) или IP хоста `172.17.0.1` (Linux) вместо `localhost`
 - Если 1С на **другом сервере**: указывайте его реальный адрес как обычно
 
 **Логи:**
+
 ```bash
-docker-compose logs -f
+docker compose logs -f
 ```
 
 **Остановка:**
+
 ```bash
-docker-compose down
+docker compose down
+```
+
+#### Обновление в docker
+
+Когда выходит новая версия необходимо пересобрать образ MCP в docker. Необходимо перейти в папку, куда клонировали репозиторий `itmcp`.
+
+```bash
+# 1. Получаем изменения новой версии
+git pull
+
+# 2. Останавливаем контейер
+docker compose down
+
+# 3. Пересобираем образ
+docker compose build --no-cache
+
+# 4. Запускаем новый образ (обновленный)
+docker compose up -d
 ```
 
 ## Режимы работы
