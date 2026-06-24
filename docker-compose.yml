@@ -1,0 +1,19 @@
+services:
+  mcp-proxy:
+    build: .
+    container_name: mcp-proxy
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Обязательно 0.0.0.0 внутри контейнера
+      MCP_HOST: "0.0.0.0"
+    volumes:
+      # Снапшот OAuth2-токенов (MCP_OAUTH2_STORE_PATH=/app/data/oauth2.json).
+      # Без этого volume токены теряются при пересоздании контейнера.
+      - ./data:/app/data
+    restart: unless-stopped
+    # Если 1С на хосте - раскомментируйте для доступа через host.docker.internal
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
