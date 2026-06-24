@@ -59,7 +59,7 @@ export async function main(): Promise<void> {
   try {
     config = getConfig();
   } catch (e) {
-    process.stderr.write(`Ошибка конфигурации: ${e}\n`);
+    process.stderr.write(`Ошибка конфигурации: ${String(e)}\n`);
     process.stderr.write("\nПроверьте, что указаны все обязательные параметры:\n");
     process.stderr.write("- MCP_ONEC_URL (URL базы 1С)\n");
     process.exit(1);
@@ -82,7 +82,7 @@ export async function main(): Promise<void> {
   } else {
     if (config.onecUsername) {
       logger.info(
-        "MCP_ONEC_USERNAME задан в режиме oauth2 — будет использован для загрузки instructions."
+        "MCP_ONEC_USERNAME задан в режиме oauth2 — будет использован для загрузки instructions.",
       );
     }
   }
@@ -90,7 +90,7 @@ export async function main(): Promise<void> {
   // Предупреждение о небезопасном CORS
   if (mode === "http" && config.corsOrigins.includes("*")) {
     logger.warning(
-      "CORS настроен на прием запросов с любого домена (\"*\"). Для production рекомендуется ограничить MCP_CORS_ORIGINS."
+      'CORS настроен на прием запросов с любого домена ("*"). Для production рекомендуется ограничить MCP_CORS_ORIGINS.',
     );
   }
 
@@ -109,7 +109,7 @@ export async function main(): Promise<void> {
     }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ERR_USE_AFTER_CLOSE") return;
-    logger.error(`Критическая ошибка: ${e}`);
+    logger.error("Критическая ошибка", e);
     process.exit(1);
   }
 }

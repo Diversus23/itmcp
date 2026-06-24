@@ -128,9 +128,7 @@ export class OAuth2Store {
 
   startCleanupTask(intervalMs: number = DEFAULT_CLEANUP_INTERVAL_MS): void {
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), intervalMs);
-    logger.debug(
-      `Запущена задача очистки OAuth2 токенов (интервал: ${intervalMs}ms)`
-    );
+    logger.debug(`Запущена задача очистки OAuth2 токенов (интервал: ${intervalMs}ms)`);
   }
 
   stopCleanupTask(): void {
@@ -150,9 +148,7 @@ export class OAuth2Store {
         });
       }
     }, intervalMs);
-    logger.debug(
-      `Запущена периодическая запись OAuth2-снапшота (интервал: ${intervalMs}ms)`
-    );
+    logger.debug(`Запущена периодическая запись OAuth2-снапшота (интервал: ${intervalMs}ms)`);
   }
 
   stopSnapshotTask(): void {
@@ -164,19 +160,26 @@ export class OAuth2Store {
 
   private cleanupExpired(): void {
     const now = Date.now();
-    let codes = 0, access = 0, refresh = 0;
+    let codes = 0,
+      access = 0,
+      refresh = 0;
 
     for (const [key, data] of this.authCodes) {
-      if (data.exp < now) { this.authCodes.delete(key); codes++; }
+      if (data.exp < now) {
+        this.authCodes.delete(key);
+        codes++;
+      }
     }
     for (const [key, data] of this.accessTokens) {
-      if (data.exp < now) { this.accessTokens.delete(key); access++; }
+      if (data.exp < now) {
+        this.accessTokens.delete(key);
+        access++;
+      }
     }
     for (const [key, data] of this.refreshTokens) {
       // Удаляем когда И сам токен истёк, И grace-окно после consume закрылось
       const consumedExpired =
-        data.consumedAt !== undefined &&
-        now - data.consumedAt > this.graceWindowMs;
+        data.consumedAt !== undefined && now - data.consumedAt > this.graceWindowMs;
       if (data.exp < now || consumedExpired) {
         this.refreshTokens.delete(key);
         refresh++;
@@ -184,9 +187,7 @@ export class OAuth2Store {
     }
 
     if (codes || access || refresh) {
-      logger.debug(
-        `Очищено токенов: codes=${codes}, access=${access}, refresh=${refresh}`
-      );
+      logger.debug(`Очищено токенов: codes=${codes}, access=${access}, refresh=${refresh}`);
       if (access || refresh) this.dirty = true;
     }
   }
@@ -232,9 +233,7 @@ export class OAuth2Store {
   saveRefreshToken(token: string, data: RefreshTokenData): void {
     this.refreshTokens.set(token, data);
     this.dirty = true;
-    logger.debug(
-      `Сохранен refresh token для ${data.login} (family=${data.family})`
-    );
+    logger.debug(`Сохранен refresh token для ${data.login} (family=${data.family})`);
   }
 
   /**
@@ -257,7 +256,7 @@ export class OAuth2Store {
     newAccessToken: string,
     newRefreshToken: string,
     accessTtlMs: number,
-    refreshTtlMs: number
+    refreshTtlMs: number,
   ): RefreshClaim {
     const data = this.refreshTokens.get(token);
     const now = Date.now();
@@ -346,7 +345,7 @@ export class OAuth2Store {
     if (revokedRefresh || revokedAccess) {
       this.dirty = true;
       logger.warning(
-        `Отозвана семья токенов ${family}: refresh=${revokedRefresh}, access=${revokedAccess}`
+        `Отозвана семья токенов ${family}: refresh=${revokedRefresh}, access=${revokedAccess}`,
       );
     }
   }
@@ -396,14 +395,18 @@ export class OAuth2Store {
         await this.renameWithRetry(tmpPath, path);
 
         logger.debug(
-          `OAuth2-снапшот сохранен: access=${payload.accessTokens.length}, refresh=${payload.refreshTokens.length}`
+          `OAuth2-снапшот сохранен: access=${payload.accessTokens.length}, refresh=${payload.refreshTokens.length}`,
         );
       } catch (e) {
         // Восстанавливаем dirty, чтобы следующий tick попробовал снова
         this.dirty = wasDirty || this.dirty;
         // Прибираем за собой временный файл, чтобы при перезапуске не
         // оставалось мусора (loadSnapshot тоже умеет его удалять).
-        try { await unlink(tmpPath); } catch { /* ignore */ }
+        try {
+          await unlink(tmpPath);
+        } catch {
+          /* ignore */
+        }
         throw e;
       } finally {
         this.snapshotInFlight = null;
@@ -447,7 +450,11 @@ export class OAuth2Store {
     if (!this.persistencePath) return;
 
     // Подчищаем мусорный *.tmp от прерванной записи
-    try { await unlink(`${this.persistencePath}.tmp`); } catch { /* ignore */ }
+    try {
+      await unlink(`${this.persistencePath}.tmp`);
+    } catch {
+      /* ignore */
+    }
 
     let raw: string;
     try {
@@ -458,7 +465,7 @@ export class OAuth2Store {
         logger.debug("OAuth2-снапшот отсутствует — старт с пустым хранилищем");
         return;
       }
-      logger.warning(`Не удалось прочитать OAuth2-снапшот: ${e}`);
+      logger.warning(`Не удалось прочитать OAuth2-снапшот: ${String(e)}`);
       return;
     }
 
@@ -466,7 +473,7 @@ export class OAuth2Store {
     try {
       payload = JSON.parse(raw);
     } catch (e) {
-      logger.warning(`OAuth2-снапшот повреждён, игнорируется: ${e}`);
+      logger.warning(`OAuth2-снапшот повреждён, игнорируется: ${String(e)}`);
       return;
     }
 
@@ -479,9 +486,7 @@ export class OAuth2Store {
       !Array.isArray((payload as SnapshotPayload).accessTokens) ||
       !Array.isArray((payload as SnapshotPayload).refreshTokens)
     ) {
-      logger.warning(
-        "OAuth2-снапшот имеет некорректную структуру или версию, игнорируется"
-      );
+      logger.warning("OAuth2-снапшот имеет некорректную структуру или версию, игнорируется");
       return;
     }
 
@@ -502,16 +507,13 @@ export class OAuth2Store {
       const [token, data] = entry;
       if (!data || typeof data.exp !== "number" || data.exp < now) continue;
       const consumedExpired =
-        data.consumedAt !== undefined &&
-        now - data.consumedAt > this.graceWindowMs;
+        data.consumedAt !== undefined && now - data.consumedAt > this.graceWindowMs;
       if (consumedExpired) continue;
       this.refreshTokens.set(token, data);
       loadedRefresh++;
     }
 
-    logger.info(
-      `OAuth2-снапшот загружен: access=${loadedAccess}, refresh=${loadedRefresh}`
-    );
+    logger.info(`OAuth2-снапшот загружен: access=${loadedAccess}, refresh=${loadedRefresh}`);
   }
 }
 
@@ -528,7 +530,7 @@ export class OAuth2Service {
     private readonly store: OAuth2Store,
     private readonly codeTtl: number = 120,
     private readonly accessTtl: number = 3600,
-    private readonly refreshTtl: number = 1209600
+    private readonly refreshTtl: number = 1209600,
   ) {}
 
   generatePrmDocument(publicUrl: string): Record<string, unknown> {
@@ -547,7 +549,7 @@ export class OAuth2Service {
     login: string,
     password: string,
     redirectUri: string,
-    codeChallenge: string
+    codeChallenge: string,
   ): string {
     const code = randomBytes(32).toString("base64url");
     this.store.saveAuthCode(code, {
@@ -603,7 +605,7 @@ export class OAuth2Service {
   exchangeCodeForTokens(
     code: string,
     redirectUri: string,
-    codeVerifier: string
+    codeVerifier: string,
   ): IssuedTokens | undefined {
     const codeData = this.store.getAuthCode(code);
     if (!codeData) {
@@ -613,7 +615,7 @@ export class OAuth2Service {
 
     if (codeData.redirectUri !== redirectUri) {
       logger.warning(
-        `Несовпадение redirect_uri: ожидался ${codeData.redirectUri}, получен ${redirectUri}`
+        `Несовпадение redirect_uri: ожидался ${codeData.redirectUri}, получен ${redirectUri}`,
       );
       return undefined;
     }
@@ -649,7 +651,7 @@ export class OAuth2Service {
       candidateAccess,
       candidateRefresh,
       this.accessTtl * 1000,
-      this.refreshTtl * 1000
+      this.refreshTtl * 1000,
     );
 
     if (claim.kind === "missing") {
@@ -659,7 +661,7 @@ export class OAuth2Service {
 
     if (claim.kind === "consumed-replay-stale") {
       logger.warning(
-        `Refresh token replay после grace-window для ${claim.login} — отзыв семьи ${claim.family}`
+        `Refresh token replay после grace-window для ${claim.login} — отзыв семьи ${claim.family}`,
       );
       this.store.revokeFamily(claim.family);
       return { kind: "replay" };
@@ -673,12 +675,9 @@ export class OAuth2Service {
         this.store.revokeFamily(claim.family);
         return { kind: "replay" };
       }
-      const expiresIn = Math.max(
-        1,
-        Math.floor((accessData.exp - Date.now()) / 1000)
-      );
+      const expiresIn = Math.max(1, Math.floor((accessData.exp - Date.now()) / 1000));
       logger.info(
-        `Refresh token использован повторно в grace-window (${claim.sinceConsumedMs}ms) — идемпотентный ответ для ${claim.login}`
+        `Refresh token использован повторно в grace-window (${claim.sinceConsumedMs}ms) — идемпотентный ответ для ${claim.login}`,
       );
       return {
         kind: "ok",
@@ -693,7 +692,7 @@ export class OAuth2Service {
 
     // claim.kind === "rotated"
     logger.debug(
-      `Обновлены токены для пользователя ${claim.login} (rotation #${claim.rotationCounter}, family=${claim.family})`
+      `Обновлены токены для пользователя ${claim.login} (rotation #${claim.rotationCounter}, family=${claim.family})`,
     );
     return {
       kind: "ok",
@@ -710,9 +709,7 @@ export class OAuth2Service {
     return this.issueNewFamily(login, password);
   }
 
-  validateAccessToken(
-    token: string
-  ): { login: string; password: string } | undefined {
+  validateAccessToken(token: string): { login: string; password: string } | undefined {
     const data = this.store.getAccessToken(token);
     if (!data) return undefined;
     return { login: data.login, password: data.password };

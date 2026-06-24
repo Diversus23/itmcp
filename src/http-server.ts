@@ -7,7 +7,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer } from "node:http";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -77,14 +77,14 @@ interface CredentialValidationResult {
 async function validateOneCCredentials(
   config: Config,
   username: string,
-  password: string
+  password: string,
 ): Promise<CredentialValidationResult> {
   const client = new OneCClient(
     config.onecUrl,
     username,
     password,
     config.onecServiceRoot,
-    config.onecTimeout
+    config.onecTimeout,
   );
   try {
     await client.checkHealth();
@@ -119,18 +119,10 @@ async function validateOneCCredentials(
  * лимита удаляются самые старые ключи (даже если ещё не истекли).
  */
 function createCachedValidator(config: Config) {
-  const cache = new Map<
-    string,
-    { result: CredentialValidationResult; exp: number }
-  >();
+  const cache = new Map<string, { result: CredentialValidationResult; exp: number }>();
 
-  return async (
-    username: string,
-    password: string
-  ): Promise<CredentialValidationResult> => {
-    const key = createHash("sha256")
-      .update(`${username}:${password}`)
-      .digest("hex");
+  return async (username: string, password: string): Promise<CredentialValidationResult> => {
+    const key = createHash("sha256").update(`${username}:${password}`).digest("hex");
     const now = Date.now();
     const cached = cache.get(key);
 
@@ -146,9 +138,7 @@ function createCachedValidator(config: Config) {
     // Connection-ошибки кэшируем на короткий промежуток, чтобы не плодить
     // запросы к недоступной 1С. Auth-ошибки и успех — на полный TTL.
     const ttl =
-      result.error === "connection"
-        ? CRED_CACHE_CONNECTION_ERROR_TTL_MS
-        : CRED_CACHE_TTL_MS;
+      result.error === "connection" ? CRED_CACHE_CONNECTION_ERROR_TTL_MS : CRED_CACHE_TTL_MS;
     cache.set(key, { result, exp: now + ttl });
 
     // Lazy cleanup протухших записей
@@ -354,12 +344,7 @@ function renderLoginPage(qs: string, config: Config): string {
 </html>`;
 }
 
-function renderErrorPage(
-  title: string,
-  message: string,
-  config: Config,
-  details?: string
-): string {
+function renderErrorPage(title: string, message: string, config: Config, details?: string): string {
   const safeTitle = escapeHtml(title);
   const safeMessage = escapeHtml(message);
   const safeDetails = details ? escapeHtml(details) : "";
@@ -389,10 +374,7 @@ function renderErrorPage(
 
 // --- Bearer-токен middleware ---
 
-function createBearerMiddleware(
-  config: Config,
-  oauth2Service: OAuth2Service | null
-) {
+function createBearerMiddleware(config: Config, oauth2Service: OAuth2Service | null) {
   const protectedPaths = ["/mcp"];
 
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -515,18 +497,14 @@ export async function runHttpServer(config: Config): Promise<void> {
       oauth2Store,
       config.oauth2CodeTtl,
       config.oauth2AccessTtl,
-      config.oauth2RefreshTtl
+      config.oauth2RefreshTtl,
     );
     oauth2Store.startCleanupTask(60_000);
     if (config.oauth2StorePath) {
       oauth2Store.startSnapshotTask(OAUTH2_SNAPSHOT_INTERVAL_MS);
-      logger.info(
-        `OAuth2 авторизация включена; снапшот: ${config.oauth2StorePath}`
-      );
+      logger.info(`OAuth2 авторизация включена; снапшот: ${config.oauth2StorePath}`);
     } else {
-      logger.info(
-        "OAuth2 авторизация включена; персистентность отключена (in-memory)"
-      );
+      logger.info("OAuth2 авторизация включена; персистентность отключена (in-memory)");
     }
   }
 
@@ -568,11 +546,7 @@ export async function runHttpServer(config: Config): Promise<void> {
     if (sessionId && sessions.has(sessionId)) {
       touchSession(sessionId);
       const entry = sessions.get(sessionId)!;
-      await entry.transport.handleRequest(
-        req as unknown as IncomingMessage,
-        res as unknown as ServerResponse,
-        req.body
-      );
+      await entry.transport.handleRequest(req, res, req.body);
       return;
     }
 
@@ -588,7 +562,9 @@ export async function runHttpServer(config: Config): Promise<void> {
           username: creds.username,
           password: creds.password,
           instructions: cachedInstructions,
-          onInstructionsFetched: (instr) => { cachedInstructions = instr; },
+          onInstructionsFetched: (instr) => {
+            cachedInstructions = instr;
+          },
         });
       } catch (e) {
         logger.error("Не удалось создать MCP-сессию (1С недоступна)", e);
@@ -611,18 +587,12 @@ export async function runHttpServer(config: Config): Promise<void> {
       transport.onclose = () => {
         if (transport.sessionId) {
           sessions.delete(transport.sessionId);
-          logger.debug(
-            `Streamable HTTP сессия закрыта: ${transport.sessionId}`
-          );
+          logger.debug(`Streamable HTTP сессия закрыта: ${transport.sessionId}`);
         }
       };
 
       await server.connect(transport);
-      await transport.handleRequest(
-        req as unknown as IncomingMessage,
-        res as unknown as ServerResponse,
-        req.body
-      );
+      await transport.handleRequest(req, res, req.body);
       return;
     }
 
@@ -638,10 +608,7 @@ export async function runHttpServer(config: Config): Promise<void> {
     if (sessionId && sessions.has(sessionId)) {
       touchSession(sessionId);
       const entry = sessions.get(sessionId)!;
-      await entry.transport.handleRequest(
-        req as unknown as IncomingMessage,
-        res as unknown as ServerResponse
-      );
+      await entry.transport.handleRequest(req, res);
     } else {
       res.status(400).send("Invalid session");
     }
@@ -706,10 +673,7 @@ export async function runHttpServer(config: Config): Promise<void> {
     };
 
     if (config.authMode === "none" && config.onecUsername) {
-      const credResult = await validateCreds(
-        config.onecUsername,
-        config.onecPassword
-      );
+      const credResult = await validateCreds(config.onecUsername, config.onecPassword);
       if (credResult.valid) {
         result.status = "healthy";
         result.onec_connection = "ok";
@@ -788,19 +752,39 @@ export async function runHttpServer(config: Config): Promise<void> {
     });
 
     app.get("/authorize", (req: Request, res: Response) => {
-      const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } =
-        req.query as Record<string, string>;
+      const {
+        response_type,
+        client_id,
+        redirect_uri,
+        state,
+        code_challenge,
+        code_challenge_method,
+      } = req.query as Record<string, string>;
 
-      if (!response_type || !client_id || !redirect_uri || !code_challenge || !code_challenge_method) {
-        res.status(400).send(renderErrorPage("Ошибка", "Отсутствуют обязательные параметры OAuth2", config));
+      if (
+        !response_type ||
+        !client_id ||
+        !redirect_uri ||
+        !code_challenge ||
+        !code_challenge_method
+      ) {
+        res
+          .status(400)
+          .send(renderErrorPage("Ошибка", "Отсутствуют обязательные параметры OAuth2", config));
         return;
       }
       if (response_type !== "code") {
-        res.status(400).send(renderErrorPage("Ошибка", "Поддерживается только response_type=code", config));
+        res
+          .status(400)
+          .send(renderErrorPage("Ошибка", "Поддерживается только response_type=code", config));
         return;
       }
       if (code_challenge_method !== "S256") {
-        res.status(400).send(renderErrorPage("Ошибка", "Поддерживается только code_challenge_method=S256", config));
+        res
+          .status(400)
+          .send(
+            renderErrorPage("Ошибка", "Поддерживается только code_challenge_method=S256", config),
+          );
         return;
       }
 
@@ -818,25 +802,29 @@ export async function runHttpServer(config: Config): Promise<void> {
       const { redirect_uri, state, code_challenge } = req.query as Record<string, string>;
 
       if (!redirect_uri || !code_challenge) {
-        res.status(400).send(renderErrorPage("Ошибка", "Отсутствуют обязательные параметры", config));
+        res
+          .status(400)
+          .send(renderErrorPage("Ошибка", "Отсутствуют обязательные параметры", config));
         return;
       }
 
       const result = await validateCreds(username, password ?? "");
       if (!result.valid) {
         if (result.error === "connection") {
-          res.status(503).send(renderErrorPage(
-            "Ошибка подключения к 1С",
-            "Не удалось подключиться к серверу 1С",
-            config,
-            result.details ?? undefined
-          ));
+          res
+            .status(503)
+            .send(
+              renderErrorPage(
+                "Ошибка подключения к 1С",
+                "Не удалось подключиться к серверу 1С",
+                config,
+                result.details ?? undefined,
+              ),
+            );
         } else {
-          res.status(401).send(renderErrorPage(
-            "Ошибка авторизации",
-            "Неверный логин или пароль 1С",
-            config
-          ));
+          res
+            .status(401)
+            .send(renderErrorPage("Ошибка авторизации", "Неверный логин или пароль 1С", config));
         }
         return;
       }
@@ -845,14 +833,16 @@ export async function runHttpServer(config: Config): Promise<void> {
         username,
         password ?? "",
         redirect_uri,
-        code_challenge
+        code_challenge,
       );
 
       const params = new URLSearchParams({ code });
       if (state) params.set("state", state);
 
       const redirectUrl = `${redirect_uri}?${params.toString()}`;
-      logger.info(`Authorization code выдан для пользователя ${username}, redirect: ${redirect_uri}`);
+      logger.info(
+        `Authorization code выдан для пользователя ${username}, redirect: ${redirect_uri}`,
+      );
       res.redirect(302, redirectUrl);
     });
 
@@ -1010,15 +1000,13 @@ export async function runHttpServer(config: Config): Promise<void> {
       try {
         await oauth2Store.saveSnapshot();
       } catch (e) {
-        logger.warning(`Не удалось сохранить финальный OAuth2-снапшот: ${e}`);
+        logger.warning(`Не удалось сохранить финальный OAuth2-снапшот: ${formatError(e)}`);
       }
     }
 
     // Закрываем все транспорты сессий параллельно
     await Promise.allSettled(
-      Array.from(sessions.values()).map((entry) =>
-        entry.transport.close().catch(() => {})
-      )
+      Array.from(sessions.values()).map((entry) => entry.transport.close().catch(() => {})),
     );
     sessions.clear();
 
@@ -1026,8 +1014,8 @@ export async function runHttpServer(config: Config): Promise<void> {
     httpServer.close();
   };
 
-  process.on("SIGINT", () => { shutdown(); });
-  process.on("SIGTERM", () => { shutdown(); });
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 
   // Ждем завершения
   await new Promise<void>((resolve) => {

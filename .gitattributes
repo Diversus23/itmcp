@@ -1,0 +1,8 @@
+# Единые переводы строк во всём репозитории — чтобы prettier --check и husky
+# вели себя одинаково на Windows, Linux и macOS.
+* text=auto eol=lf
+
+# Бинарные файлы не трогаем
+*.png binary
+*.jpg binary
+*.ico binary
