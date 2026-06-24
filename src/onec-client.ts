@@ -202,8 +202,15 @@ export class OneCClient {
     return rpcResponse.result ?? {};
   }
 
-  async initialize(): Promise<Record<string, unknown>> {
-    return this.callRpc("initialize");
+  async initialize(clientInfo?: {
+    name: string;
+    version: string;
+  }): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {};
+    if (clientInfo) {
+      params.clientInfo = clientInfo;
+    }
+    return this.callRpc("initialize", params);
   }
 
   async listTools(cursor?: string): Promise<{ tools: Tool[]; nextCursor?: string }> {

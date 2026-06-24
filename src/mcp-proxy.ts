@@ -37,7 +37,10 @@ export async function prefetchInstructions(config: Config): Promise<string | und
       config.onecTimeout,
     );
     try {
-      const initResult = await client.initialize();
+      const initResult = await client.initialize({
+        name: config.serverName,
+        version: config.serverVersion,
+      });
       logger.debug("Instructions получены из 1С");
       return initResult.instructions as string | undefined;
     } finally {
@@ -82,7 +85,10 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
   let resolvedInstructions = instructions;
   if (!resolvedInstructions) {
     try {
-      const initResult = await client.initialize();
+      const initResult = await client.initialize({
+        name: config.serverName,
+        version: config.serverVersion,
+      });
       resolvedInstructions = initResult.instructions as string | undefined;
       if (resolvedInstructions) {
         logger.debug("Instructions получены через сессионный клиент");
