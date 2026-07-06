@@ -521,9 +521,7 @@ export class OAuth2Store {
 
 /** Результат refresh-операции с указанием причины отказа. */
 export type RefreshResult =
-  | { kind: "ok"; tokens: IssuedTokens }
-  | { kind: "invalid" }
-  | { kind: "replay" };
+  { kind: "ok"; tokens: IssuedTokens } | { kind: "invalid" } | { kind: "replay" };
 
 export class OAuth2Service {
   constructor(
