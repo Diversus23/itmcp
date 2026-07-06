@@ -11,6 +11,15 @@
 - Проксирование всех MCP-примитивов: Tools, Resources, Prompts
 - Опциональная OAuth2 авторизация с per-user креденшилами
 
+## Документация
+
+Пошаговые руководства для решения «Управление IT-отделом 8», редакция 4.0:
+
+- [Развертывание MCP-сервера на виртуальной машине](https://docs.softonit.ru/it/iskusstvennyy-intellekt/mcp/razvertyvanie-mcp-servera) — установка прокси на отдельной ВМ с Docker.
+- [Подключение AI-клиентов к MCP-серверу](https://docs.softonit.ru/it/iskusstvennyy-intellekt/mcp/podklyuchenie-ai-klientov) — настройка Claude Desktop, Cursor и Claude Code, в том числе с OAuth2-авторизацией.
+
+Ниже — техническая справка по самому прокси.
+
 ## Быстрый старт
 
 ### Требования
@@ -29,6 +38,8 @@ npm run build
 ```
 
 ### Выбор режима работы
+
+> 📖 Пошаговая настройка клиентов (Claude Desktop, Cursor, Claude Code) с OAuth2-авторизацией — в статье [Подключение AI-клиентов](https://docs.softonit.ru/it/iskusstvennyy-intellekt/mcp/podklyuchenie-ai-klientov).
 
 #### Stdio режим
 
@@ -111,6 +122,8 @@ node dist/index.js http --port 8000
 ### Docker
 
 Запуск в контейнере для изоляции и упрощения развертывания.
+
+> 📖 Полное пошаговое руководство по развёртыванию на отдельной ВМ — [Развертывание MCP-сервера](https://docs.softonit.ru/it/iskusstvennyy-intellekt/mcp/razvertyvanie-mcp-servera).
 
 #### Первичная установка
 
