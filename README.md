@@ -78,7 +78,7 @@ MCP_ONEC_PASSWORD=password
 node dist/index.js http --port 8000
 ```
 
-**Минимальная конфигурация клиента если запуск через Docker:**
+**Подключение клиентов с нативной поддержкой HTTP** (Cursor, VS Code, Claude Code):
 
 ```json
 {
@@ -90,6 +90,23 @@ node dist/index.js http --port 8000
   }
 }
 ```
+
+**Подключение Claude Desktop к HTTP-серверу**
+
+`claude_desktop_config.json` не поддерживает поле `"url"` (`"type": "http"`) — только stdio-запуск через `"command"`. Поэтому Claude Desktop подключается к HTTP-серверу через локальный мост [`mcp-remote`](https://www.npmjs.com/package/mcp-remote): он стартует по stdio и проксирует запросы на HTTP-endpoint. Нужен установленный Node.js (см. [Требования](#требования)) — его вызывает `npx`.
+
+```json
+{
+  "mcpServers": {
+    "uit": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://192.168.88.124:8000/mcp", "--allow-http"]
+    }
+  }
+}
+```
+
+Замените `http://192.168.88.124:8000/mcp` на адрес вашего HTTP-сервера (для локального запуска — `http://localhost:8000/mcp`). Флаг `--allow-http` обязателен, если endpoint работает по обычному HTTP, а не HTTPS.
 
 ### Docker
 
