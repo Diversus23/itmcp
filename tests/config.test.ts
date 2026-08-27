@@ -21,6 +21,11 @@ const MCP_KEYS = [
   "MCP_OAUTH2_REFRESH_TTL",
   "MCP_OAUTH2_STORE_PATH",
   "MCP_OAUTH2_REFRESH_GRACE_MS",
+  "MCP_AUTH_RATE_LIMIT_MAX_ATTEMPTS",
+  "MCP_AUTH_RATE_LIMIT_WINDOW_MS",
+  "MCP_AUTH_RATE_LIMIT_BLOCK_MS",
+  "MCP_AUTH_RATE_LIMIT_BY_IP",
+  "MCP_TRUST_PROXY",
 ];
 
 describe("getConfig", () => {
@@ -104,5 +109,82 @@ describe("getConfig", () => {
     process.env.MCP_ONEC_URL = "http://localhost/base";
     process.env.MCP_LOG_LEVEL = "TRACE";
     expect(() => getConfig()).toThrow();
+  });
+
+  it("задаёт значения rate-limit по умолчанию", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    const cfg = getConfig();
+    expect(cfg.authRateLimitMaxAttempts).toBe(5);
+    expect(cfg.authRateLimitWindowMs).toBe(900_000);
+    expect(cfg.authRateLimitBlockMs).toBe(60_000);
+  });
+
+  it("читает параметры rate-limit из окружения", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_AUTH_RATE_LIMIT_MAX_ATTEMPTS = "10";
+    process.env.MCP_AUTH_RATE_LIMIT_WINDOW_MS = "60000";
+    process.env.MCP_AUTH_RATE_LIMIT_BLOCK_MS = "30000";
+    const cfg = getConfig();
+    expect(cfg.authRateLimitMaxAttempts).toBe(10);
+    expect(cfg.authRateLimitWindowMs).toBe(60_000);
+    expect(cfg.authRateLimitBlockMs).toBe(30_000);
+  });
+
+  it("принимает 0 как отключение rate-limit", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_AUTH_RATE_LIMIT_MAX_ATTEMPTS = "0";
+    expect(getConfig().authRateLimitMaxAttempts).toBe(0);
+  });
+
+  it("учёт по IP включен по умолчанию", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    expect(getConfig().authRateLimitByIp).toBe(true);
+  });
+
+  it("MCP_AUTH_RATE_LIMIT_BY_IP=false отключает учёт по IP", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_AUTH_RATE_LIMIT_BY_IP = "false";
+    expect(getConfig().authRateLimitByIp).toBe(false);
+  });
+
+  it("MCP_AUTH_RATE_LIMIT_BY_IP=0 отключает учёт по IP", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_AUTH_RATE_LIMIT_BY_IP = "0";
+    expect(getConfig().authRateLimitByIp).toBe(false);
+  });
+
+  it("MCP_AUTH_RATE_LIMIT_BY_IP=true оставляет учёт по IP включенным", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_AUTH_RATE_LIMIT_BY_IP = "true";
+    expect(getConfig().authRateLimitByIp).toBe(true);
+  });
+
+  it("отвергает отрицательный лимит попыток", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_AUTH_RATE_LIMIT_MAX_ATTEMPTS = "-1";
+    expect(() => getConfig()).toThrow();
+  });
+
+  it("trustProxy по умолчанию не задан", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    expect(getConfig().trustProxy).toBeUndefined();
+  });
+
+  it("парсит MCP_TRUST_PROXY=true как boolean", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_TRUST_PROXY = "true";
+    expect(getConfig().trustProxy).toBe(true);
+  });
+
+  it("парсит числовой MCP_TRUST_PROXY как число прокси-хопов", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_TRUST_PROXY = "2";
+    expect(getConfig().trustProxy).toBe(2);
+  });
+
+  it("передаёт строковый MCP_TRUST_PROXY как есть (например, loopback)", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_TRUST_PROXY = "loopback";
+    expect(getConfig().trustProxy).toBe("loopback");
   });
 });

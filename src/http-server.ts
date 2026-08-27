@@ -14,7 +14,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMCPProxyServer, prefetchInstructions } from "./mcp-proxy.js";
 import { OneCClient } from "./onec-client.js";
-import { OAuth2Service, OAuth2Store } from "./auth/index.js";
+import { AuthRateLimiter, OAuth2Service, OAuth2Store } from "./auth/index.js";
 import type { Config } from "./config.js";
 import { createLogger, formatError } from "./logger.js";
 
@@ -450,6 +450,12 @@ export async function runHttpServer(config: Config): Promise<void> {
 
   const app = express();
 
+  // За reverse proxy req.ip должен браться из X-Forwarded-For, иначе
+  // rate limiting по IP будет видеть только адрес прокси
+  if (config.trustProxy !== undefined) {
+    app.set("trust proxy", config.trustProxy);
+  }
+
   // Увеличенный лимит тела запроса (50mb для больших tool calls)
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -486,6 +492,7 @@ export async function runHttpServer(config: Config): Promise<void> {
   // OAuth2
   let oauth2Store: OAuth2Store | null = null;
   let oauth2Service: OAuth2Service | null = null;
+  let authRateLimiter: AuthRateLimiter | null = null;
   if (config.authMode === "oauth2") {
     oauth2Store = new OAuth2Store({
       persistencePath: config.oauth2StorePath,
@@ -509,6 +516,21 @@ export async function runHttpServer(config: Config): Promise<void> {
       logger.info(`OAuth2 авторизация включена; снапшот: ${config.oauth2StorePath}`);
     } else {
       logger.info("OAuth2 авторизация включена; персистентность отключена (in-memory)");
+    }
+
+    // Защита от перебора паролей на /authorize и /token
+    if (config.authRateLimitMaxAttempts > 0) {
+      authRateLimiter = new AuthRateLimiter({
+        maxAttempts: config.authRateLimitMaxAttempts,
+        windowMs: config.authRateLimitWindowMs,
+        baseBlockMs: config.authRateLimitBlockMs,
+      });
+      authRateLimiter.startCleanupTask();
+      logger.info(
+        `Rate limiting авторизации включен: ${config.authRateLimitMaxAttempts} попыток / ${Math.round(config.authRateLimitWindowMs / 1000)}с, блокировка от ${Math.round(config.authRateLimitBlockMs / 1000)}с${config.authRateLimitByIp ? "" : "; учёт по IP отключен"}`,
+      );
+    } else {
+      logger.warning("Rate limiting авторизации ОТКЛЮЧЕН (MCP_AUTH_RATE_LIMIT_MAX_ATTEMPTS=0)");
     }
   }
 
@@ -703,6 +725,16 @@ export async function runHttpServer(config: Config): Promise<void> {
 
   if (config.authMode === "oauth2" && oauth2Service) {
     const svc = oauth2Service;
+    const limiter = authRateLimiter;
+
+    /** Ключи rate-limit: по логину 1С и (если не отключено) по IP клиента. */
+    const rateLimitKeys = (req: Request, username: unknown): string[] => {
+      const keys = [`login:${typeof username === "string" ? username : ""}`];
+      if (config.authRateLimitByIp) {
+        keys.push(`ip:${req.ip ?? "unknown"}`);
+      }
+      return keys;
+    };
 
     app.get("/.well-known/oauth-protected-resource", (req: Request, res: Response) => {
       res.json(svc.generatePrmDocument(getPublicUrl(config, req)));
@@ -812,8 +844,28 @@ export async function runHttpServer(config: Config): Promise<void> {
         return;
       }
 
+      const rlKeys = rateLimitKeys(req, username ?? "");
+      const rl = limiter?.check(rlKeys);
+      if (rl && !rl.allowed) {
+        const retryAfterSec = Math.ceil(rl.retryAfterMs / 1000);
+        res
+          .status(429)
+          .set("Retry-After", String(retryAfterSec))
+          .send(
+            renderErrorPage(
+              "Слишком много попыток",
+              `Превышен лимит неудачных попыток входа. Повторите через ${retryAfterSec} сек.`,
+              config,
+            ),
+          );
+        return;
+      }
+
       const result = await validateCreds(username, password ?? "");
       if (!result.valid) {
+        if (result.error === "auth") {
+          limiter?.recordFailure(rlKeys);
+        }
         if (result.error === "connection") {
           res
             .status(503)
@@ -832,6 +884,8 @@ export async function runHttpServer(config: Config): Promise<void> {
         }
         return;
       }
+
+      limiter?.recordSuccess(rlKeys);
 
       const code = svc.generateAuthorizationCode(
         username,
@@ -864,6 +918,20 @@ export async function runHttpServer(config: Config): Promise<void> {
           return;
         }
 
+        const rlKeys = rateLimitKeys(req, username);
+        const rl = limiter?.check(rlKeys);
+        if (rl && !rl.allowed) {
+          const retryAfterSec = Math.ceil(rl.retryAfterMs / 1000);
+          res
+            .status(429)
+            .set("Retry-After", String(retryAfterSec))
+            .json({
+              error: "rate_limited",
+              error_description: `Too many failed login attempts, retry after ${retryAfterSec}s`,
+            });
+          return;
+        }
+
         const credResult = await validateCreds(username, password ?? "");
         if (!credResult.valid) {
           if (credResult.error === "connection") {
@@ -872,6 +940,7 @@ export async function runHttpServer(config: Config): Promise<void> {
               error_description: `Unable to connect to 1C: ${credResult.details ?? "unknown error"}`,
             });
           } else {
+            limiter?.recordFailure(rlKeys);
             res.status(400).json({
               error: "invalid_grant",
               error_description: "Invalid username or password",
@@ -879,6 +948,8 @@ export async function runHttpServer(config: Config): Promise<void> {
           }
           return;
         }
+
+        limiter?.recordSuccess(rlKeys);
 
         const result = svc.generateTokensFromCredentials(username, password ?? "");
 
@@ -997,6 +1068,7 @@ export async function runHttpServer(config: Config): Promise<void> {
   const shutdown = async () => {
     logger.info("Остановка HTTP-сервера...");
     clearInterval(sessionCleanupTimer);
+    authRateLimiter?.stopCleanupTask();
     if (oauth2Store) {
       oauth2Store.stopCleanupTask();
       oauth2Store.stopSnapshotTask();

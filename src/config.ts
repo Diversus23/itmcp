@@ -40,6 +40,38 @@ const configSchema = z.object({
   oauth2StorePath: z.string().optional(),
   /** Окно идемпотентности при ротации refresh-токена (мс). */
   oauth2RefreshGraceMs: z.coerce.number().int().min(0).default(60_000),
+
+  // Защита от перебора паролей (rate limiting на /authorize и /token)
+  /** Неудачных попыток до блокировки; 0 — отключить rate limiting. */
+  authRateLimitMaxAttempts: z.coerce.number().int().min(0).default(5),
+  /** Окно накопления неудачных попыток (мс). */
+  authRateLimitWindowMs: z.coerce.number().int().min(1000).default(900_000),
+  /** Базовая длительность блокировки (мс); удваивается при повторных сериях. */
+  authRateLimitBlockMs: z.coerce.number().int().min(1000).default(60_000),
+  /**
+   * Учитывать ли IP клиента при подсчёте неудачных попыток. Отключайте
+   * ("false"/"0") только там, где все клиенты видны с одного адреса
+   * (Docker Desktop, прокси без X-Forwarded-For) — останется учёт по логину.
+   */
+  authRateLimitByIp: z
+    .string()
+    .optional()
+    .transform((v) => v === undefined || !["false", "0", "no", "off"].includes(v.toLowerCase())),
+
+  /**
+   * Значение для express "trust proxy": true, число хопов или строка
+   * ("loopback", список IP). Обязателен за reverse proxy, иначе rate limiting
+   * по IP будет считать все запросы пришедшими с адреса прокси.
+   */
+  trustProxy: z
+    .string()
+    .optional()
+    .transform((v): boolean | number | string | undefined => {
+      if (v === undefined) return undefined;
+      if (v === "true") return true;
+      if (/^\d+$/.test(v)) return Number(v);
+      return v;
+    }),
 });
 
 export type Config = z.infer<typeof configSchema>;
@@ -84,6 +116,11 @@ export function getConfig(): Config {
     oauth2RefreshTtl: env("OAUTH2_REFRESH_TTL"),
     oauth2StorePath: env("OAUTH2_STORE_PATH"),
     oauth2RefreshGraceMs: env("OAUTH2_REFRESH_GRACE_MS"),
+    authRateLimitMaxAttempts: env("AUTH_RATE_LIMIT_MAX_ATTEMPTS"),
+    authRateLimitWindowMs: env("AUTH_RATE_LIMIT_WINDOW_MS"),
+    authRateLimitBlockMs: env("AUTH_RATE_LIMIT_BLOCK_MS"),
+    authRateLimitByIp: env("AUTH_RATE_LIMIT_BY_IP"),
+    trustProxy: env("TRUST_PROXY"),
   };
 
   // Удаляем undefined значения, чтобы zod использовал defaults
