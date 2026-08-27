@@ -4,7 +4,7 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), проект следует [семантическому версионированию](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [1.2.2] - 2026-08-27
 
 ### Added
 
