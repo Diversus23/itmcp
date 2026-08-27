@@ -5,6 +5,26 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 проект следует [семантическому версионированию](https://semver.org/lang/ru/).
 
+## [1.2.1] - 2026-08-27
+
+### Security
+
+- Обновлён `undici` 8.5.0 → 8.10.0: закрыты уязвимости GHSA-4cwx-7wf7-3272
+  (high — раскрытие данных между пользователями через разделяемый кэш),
+  GHSA-m8rv-5g2x-5cg5, GHSA-jr45-8vmc-qm54, GHSA-8xcm-r25x-g524,
+  GHSA-v3r7-h72x-cjcm (CRLF-инъекции, обход ограничений кэша, инъекция
+  атрибутов cookie).
+
+### Changed
+
+- Обновлён `@modelcontextprotocol/sdk` 1.29.0 → 1.30.0 (исправления SSE
+  keep-alive в Streamable HTTP-транспорте и валидации Content-Type).
+- Обновлены dev-зависимости: `eslint` 10.9.1, `typescript-eslint` 8.68.0,
+  `prettier` 3.9.6, `vitest`/`@vitest/coverage-v8` 4.1.11,
+  `lint-staged` 17.4.1, `@types/node` 26.4.0.
+- Обновлены GitHub Actions: `actions/checkout` v7, `actions/setup-node` v7,
+  `docker/metadata-action` v6.
+
 ## [1.2.0] - 2026-07-06
 
 ### Added
