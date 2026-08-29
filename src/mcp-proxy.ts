@@ -58,6 +58,14 @@ export interface MCPProxyOptions {
   password: string;
   instructions?: string;
   onInstructionsFetched?: (instructions: string) => void;
+  /**
+   * Белый каталог для save_file: запись возможна только внутрь него.
+   * Не задан — путь из аргументов инструмента используется как есть
+   * (доверенный локальный stdio-запуск).
+   */
+  saveFileAllowedDir?: string;
+  /** Пропустить health-check 1С (вызывающий код уже проверил доступность). */
+  skipHealthCheck?: boolean;
 }
 
 /**
@@ -67,7 +75,15 @@ export interface MCPProxyOptions {
  * Выполняет health check при создании - бросает исключение, если 1С недоступна.
  */
 export async function createMCPProxyServer(options: MCPProxyOptions): Promise<McpServer> {
-  const { config, username, password, instructions, onInstructionsFetched } = options;
+  const {
+    config,
+    username,
+    password,
+    instructions,
+    onInstructionsFetched,
+    saveFileAllowedDir,
+    skipHealthCheck,
+  } = options;
 
   // Создаем клиент 1С для этого сервера (per-session)
   const client = new OneCClient(
@@ -79,7 +95,9 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
   );
 
   // Проверяем подключение к 1С при создании сессии
-  await client.checkHealth();
+  if (!skipHealthCheck) {
+    await client.checkHealth();
+  }
 
   // Если instructions не загружены при старте (OAuth2), получаем через сессионный клиент
   let resolvedInstructions = instructions;
@@ -175,7 +193,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
         }
 
         logger.debug(`save_file: скачивание ${fileId}`);
-        const result = await client.downloadFile(fileId, destPath);
+        const result = await client.downloadFile(fileId, destPath, saveFileAllowedDir);
 
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],

@@ -26,7 +26,7 @@ let baseUrl: string;
 
 const SESSION_TTL_MS = 200; // маленький TTL, чтобы тесты не ждали минуты
 
-function makeConfig(): Config {
+function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     host: "127.0.0.1",
     port: 0,
@@ -52,20 +52,34 @@ function makeConfig(): Config {
     authRateLimitByIp: true,
     trustProxy: undefined,
     sessionTtlMs: SESSION_TTL_MS,
+    maxSessions: 1000,
+    saveFileDir: undefined,
+    ...overrides,
   };
 }
 
+let healthHits = 0;
+
 beforeAll(async () => {
-  // Мок 1С: health отвечает ok, JSON-RPC отвечает пустыми списками
+  // Мок 1С: health отвечает ok, JSON-RPC отвечает пустыми списками,
+  // /files/* отдает бинарное содержимое с Content-Disposition
   onecServer = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
-      res.setHeader("content-type", "application/json");
       if (req.url?.endsWith("/health")) {
+        healthHits++;
+        res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ status: "ok" }));
         return;
       }
+      if (req.url?.includes("/files/")) {
+        res.setHeader("content-type", "application/octet-stream");
+        res.setHeader("content-disposition", 'attachment; filename="task.bin"');
+        res.end("DATA");
+        return;
+      }
+      res.setHeader("content-type", "application/json");
       let id: unknown = null;
       try {
         id = (JSON.parse(body) as { id?: unknown }).id ?? null;
@@ -117,8 +131,8 @@ function toolsListBody(): string {
   return JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 }
 
-async function initializeSession(): Promise<string> {
-  const res = await fetch(`${baseUrl}/mcp`, {
+async function initializeSession(base: string = baseUrl): Promise<string> {
+  const res = await fetch(`${base}/mcp`, {
     method: "POST",
     headers: { "content-type": "application/json", accept: ACCEPT },
     body: initializeBody(),
@@ -128,6 +142,25 @@ async function initializeSession(): Promise<string> {
   expect(sessionId).toBeTruthy();
   await res.body?.cancel();
   return sessionId as string;
+}
+
+/** Извлекает JSON-RPC сообщение из SSE-ответа POST /mcp. */
+async function readSseResult(res: Response): Promise<unknown> {
+  const text = await res.text();
+  const line = text.split("\n").find((l) => l.startsWith("data: "));
+  return line ? JSON.parse(line.slice(6)) : undefined;
+}
+
+async function postToSession(sessionId: string, body: string): Promise<Response> {
+  return fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: ACCEPT,
+      "mcp-session-id": sessionId,
+    },
+    body,
+  });
 }
 
 function sleep(ms: number): Promise<void> {
@@ -205,6 +238,115 @@ describe("/mcp — неизвестная сессия (спецификация
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: { code?: number } };
     expect(body.error?.code).toBe(-32000);
+  });
+});
+
+describe("лимиты тела запроса", () => {
+  it("большое тело на не-/mcp эндпоинт отвергается с 413", async () => {
+    const res = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pad: "a".repeat(200_000) }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("/mcp принимает большое тело (лимит 50mb)", async () => {
+    const body = JSON.parse(initializeBody()) as {
+      params: { clientInfo: Record<string, unknown> };
+    };
+    body.params.clientInfo.pad = "a".repeat(200_000);
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+    await res.body?.cancel();
+  });
+});
+
+describe("кап количества сессий", () => {
+  it("при превышении лимита вытесняется самая старая сессия", async () => {
+    const h2 = await createHttpApp(makeConfig({ maxSessions: 2, sessionTtlMs: 60_000 }));
+    const srv2 = createServer(h2.app);
+    await new Promise<void>((resolve) => srv2.listen(0, "127.0.0.1", resolve));
+    const base2 = `http://127.0.0.1:${(srv2.address() as AddressInfo).port}`;
+
+    try {
+      const s1 = await initializeSession(base2);
+      const s2 = await initializeSession(base2);
+      const s3 = await initializeSession(base2);
+
+      const check = async (sid: string) =>
+        fetch(`${base2}/mcp`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: ACCEPT,
+            "mcp-session-id": sid,
+          },
+          body: toolsListBody(),
+        });
+
+      const r1 = await check(s1);
+      expect(r1.status).toBe(404); // самая старая вытеснена
+
+      const r2 = await check(s2);
+      expect(r2.status).toBe(200);
+      await r2.body?.cancel();
+
+      const r3 = await check(s3);
+      expect(r3.status).toBe(200);
+      await r3.body?.cancel();
+    } finally {
+      await h2.dispose();
+      await new Promise<void>((resolve) => srv2.close(() => resolve()));
+    }
+  });
+});
+
+describe("кэширование health-check при создании сессии", () => {
+  it("повторные initialize не порождают шторм health-check'ов в 1С", async () => {
+    const before = healthHits;
+    await initializeSession();
+    await initializeSession();
+    // Кэш валидатора (10 сек) — максимум один реальный health-check
+    expect(healthHits - before).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("save_file — ограничение каталога записи", () => {
+  async function callSaveFile(sessionId: string, args: Record<string, unknown>) {
+    const res = await postToSession(
+      sessionId,
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "save_file", arguments: args },
+      }),
+    );
+    expect(res.status).toBe(200);
+    return (await readSseResult(res)) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
+  }
+
+  it("в HTTP-режиме запись по произвольному пути отклоняется", async () => {
+    const sessionId = await initializeSession();
+    const outside = process.platform === "win32" ? "C:\\evil-dir\\evil.bin" : "/etc/evil.bin";
+    const msg = await callSaveFile(sessionId, { file_id: "ref_files_a", path: outside });
+    expect(msg.result?.isError).toBe(true);
+    expect(msg.result?.content?.[0]?.text).toMatch(/outside/i);
+  });
+
+  it("в HTTP-режиме файл без path сохраняется в служебный каталог", async () => {
+    const sessionId = await initializeSession();
+    const msg = await callSaveFile(sessionId, { file_id: "ref_files_b" });
+    expect(msg.result?.isError).toBe(false);
+    const payload = JSON.parse(msg.result?.content?.[0]?.text ?? "{}") as { path?: string };
+    expect(payload.path).toContain("mcp-files");
   });
 });
 

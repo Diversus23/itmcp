@@ -19,6 +19,8 @@ export async function runStdioServer(config: Config): Promise<void> {
     username: config.onecUsername ?? "",
     password: config.onecPassword,
     instructions,
+    // Локальный доверенный запуск: без MCP_SAVE_FILE_DIR ограничений нет
+    saveFileAllowedDir: config.saveFileDir,
   });
 
   const transport = new StdioServerTransport();

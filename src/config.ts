@@ -28,6 +28,17 @@ const configSchema = z.object({
    * считается активной и по TTL не вычищается.
    */
   sessionTtlMs: z.coerce.number().int().min(1000).default(86_400_000),
+  /**
+   * Максимум одновременных HTTP-сессий /mcp; при превышении вытесняется
+   * самая старая неактивная сессия (защита памяти от initialize-штормов).
+   */
+  maxSessions: z.coerce.number().int().min(1).default(1000),
+  /**
+   * Белый каталог для инструмента save_file. Если задан — файлы пишутся
+   * только внутрь него. В HTTP-режиме без настройки используется
+   * служебный каталог во временной директории.
+   */
+  saveFileDir: z.string().optional(),
 
   // Настройки логирования
   logLevel: z.enum(["DEBUG", "INFO", "WARNING", "ERROR"]).default("INFO"),
@@ -113,6 +124,8 @@ export function getConfig(): Config {
     serverName: env("SERVER_NAME"),
     serverVersion: undefined,
     sessionTtlMs: env("SESSION_TTL_MS"),
+    maxSessions: env("MAX_SESSIONS"),
+    saveFileDir: env("SAVE_FILE_DIR"),
     logLevel: env("LOG_LEVEL"),
     corsOrigins,
     authMode: env("AUTH_MODE"),

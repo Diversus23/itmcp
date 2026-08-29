@@ -8,6 +8,8 @@
 
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -491,9 +493,12 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
     app.set("trust proxy", config.trustProxy);
   }
 
-  // Увеличенный лимит тела запроса (50mb для больших tool calls)
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+  // Большой лимит тела — только для /mcp (крупные tool calls). Остальным
+  // эндпоинтам (OAuth-ручки и пр.) хватает 100kb: иначе неавторизованный
+  // клиент мог бы исчерпывать память 50-мегабайтными телами на /token
+  app.use("/mcp", express.json({ limit: "50mb" }));
+  app.use(express.json({ limit: "100kb" }));
+  app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 
   // CORS — корректная обработка credentials + origin
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -617,7 +622,29 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
     if (isInitializeRequest(req.body)) {
       const creds = getSessionCredentials(req);
 
-      // Health check — если 1С недоступна, сессия не создается
+      // Health check через кэширующий валидатор (TTL 10 сек): рой
+      // переинициализаций после рестарта прокси не превращается в шторм
+      // health-check'ов к 1С
+      const check = await validateCreds(creds.username, creds.password);
+      if (!check.valid) {
+        if (check.error === "auth") {
+          // Креденшилы перестали приниматься 1С (пароль сменили) —
+          // клиент должен пройти авторизацию заново
+          res
+            .status(401)
+            .set("WWW-Authenticate", 'Bearer error="invalid_token"')
+            .json({ error: "invalid_token" });
+          return;
+        }
+        logger.error(`Не удалось создать MCP-сессию (1С недоступна): ${check.details ?? ""}`);
+        res.status(503).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: `1C service unavailable: ${check.details ?? ""}` },
+          id: null,
+        });
+        return;
+      }
+
       let server: McpServer;
       try {
         server = await createMCPProxyServer({
@@ -628,6 +655,9 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
           onInstructionsFetched: (instr) => {
             cachedInstructions = instr;
           },
+          skipHealthCheck: true,
+          // Запись файлов save_file в HTTP-режиме — только в белый каталог
+          saveFileAllowedDir: config.saveFileDir ?? join(tmpdir(), "mcp-files"),
         });
       } catch (e) {
         logger.error("Не удалось создать MCP-сессию (1С недоступна)", e);
@@ -642,6 +672,21 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id: string) => {
+          // Кап на количество сессий: вытесняем самые старые неактивные,
+          // чтобы initialize-шторм не исчерпал память
+          while (sessions.size >= config.maxSessions) {
+            let oldest: [string, SessionEntry] | undefined;
+            for (const candidate of sessions) {
+              if (candidate[1].activeStreams > 0) continue;
+              if (!oldest || candidate[1].lastActivity < oldest[1].lastActivity) {
+                oldest = candidate;
+              }
+            }
+            if (!oldest) break; // все сессии с живыми стримами — не рвём их
+            oldest[1].transport.close().catch(() => {});
+            sessions.delete(oldest[0]);
+            logger.debug(`Сессия ${oldest[0]} вытеснена по лимиту maxSessions`);
+          }
           sessions.set(id, { transport, server, lastActivity: Date.now(), activeStreams: 0 });
           logger.debug(`Streamable HTTP сессия создана: ${id}`);
         },
@@ -1091,8 +1136,11 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     logger.error(`Unhandled error: ${formatError(err)}`);
     if (res.headersSent) return;
-    res.status(500).json({
-      error: "server_error",
+    // body-parser и прочие middleware выставляют статус ошибки
+    // (например, 413 Payload Too Large) — не подменяем его на 500
+    const status = (err as { status?: number }).status ?? 500;
+    res.status(status).json({
+      error: status === 413 ? "payload_too_large" : "server_error",
       error_description: err.message || "Internal server error",
     });
   });
@@ -1137,6 +1185,9 @@ export async function runHttpServer(config: Config): Promise<void> {
     await dispose();
     // Закрываем HTTP-сервер (перестаем принимать новые соединения)
     httpServer.close();
+    // Рвём keep-alive и SSE-соединения: иначе close() будет ждать их
+    // закрытия бесконечно и процесс зависнет до kill-таймаута
+    httpServer.closeAllConnections();
   };
 
   process.on("SIGINT", () => void shutdown());

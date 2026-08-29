@@ -27,6 +27,8 @@ const MCP_KEYS = [
   "MCP_AUTH_RATE_LIMIT_BY_IP",
   "MCP_TRUST_PROXY",
   "MCP_SESSION_TTL_MS",
+  "MCP_MAX_SESSIONS",
+  "MCP_SAVE_FILE_DIR",
 ];
 
 describe("getConfig", () => {
@@ -181,6 +183,34 @@ describe("getConfig", () => {
     process.env.MCP_ONEC_URL = "http://localhost/base";
     process.env.MCP_SESSION_TTL_MS = "500";
     expect(() => getConfig()).toThrow();
+  });
+
+  it("maxSessions по умолчанию 1000", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    expect(getConfig().maxSessions).toBe(1000);
+  });
+
+  it("читает MCP_MAX_SESSIONS из окружения", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_MAX_SESSIONS = "50";
+    expect(getConfig().maxSessions).toBe(50);
+  });
+
+  it("отвергает MCP_MAX_SESSIONS меньше 1", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_MAX_SESSIONS = "0";
+    expect(() => getConfig()).toThrow();
+  });
+
+  it("saveFileDir по умолчанию не задан", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    expect(getConfig().saveFileDir).toBeUndefined();
+  });
+
+  it("читает MCP_SAVE_FILE_DIR из окружения", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_SAVE_FILE_DIR = "/srv/mcp-files";
+    expect(getConfig().saveFileDir).toBe("/srv/mcp-files");
   });
 
   it("trustProxy по умолчанию не задан", () => {

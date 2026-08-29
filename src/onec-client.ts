@@ -6,7 +6,7 @@ import { Agent, type Dispatcher } from "undici";
 import { createWriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { createLogger } from "./logger.js";
@@ -367,10 +367,16 @@ export class OneCClient {
   /**
    * Скачать файл из 1С через бинарный endpoint MCP HTTP-сервиса.
    * Файл стримится напрямую на диск, минуя JSON-RPC и base64.
+   *
+   * При заданном allowedDir запись ограничена этим каталогом: destPath
+   * (в том числе относительный) разрешается относительно него, а выход
+   * за его пределы отвергается. Без allowedDir destPath используется
+   * как есть (доверенный локальный запуск).
    */
   async downloadFile(
     fileRefId: string,
     destPath?: string,
+    allowedDir?: string,
   ): Promise<{ path: string; size: number; mimeType: string; filename: string }> {
     this.ensureOpen();
 
@@ -405,9 +411,25 @@ export class OneCClient {
         filename = match[1];
       }
     }
+    // Санитизация: только базовое имя — Content-Disposition приходит извне
+    // и не должен управлять каталогом записи (path traversal)
+    filename = basename(filename.replace(/\\/g, "/"));
+    if (!filename || filename === "." || filename === "..") {
+      filename = fileRefId;
+    }
 
     let outputPath: string;
-    if (destPath) {
+    if (allowedDir) {
+      const dir = resolve(allowedDir);
+      outputPath = destPath ? resolve(dir, destPath) : join(dir, filename);
+      const rel = relative(dir, outputPath);
+      if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+        throw new Error(
+          `Destination path is outside of the allowed directory: ${destPath ?? filename}`,
+        );
+      }
+      await mkdir(dirname(outputPath), { recursive: true });
+    } else if (destPath) {
       outputPath = destPath;
     } else {
       const tempDir = join(tmpdir(), "mcp-files");
