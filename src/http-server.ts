@@ -22,8 +22,7 @@ const logger = createLogger("http-server");
 
 // --- Константы ---
 
-const SESSION_TTL_MS = 30 * 60 * 1000; // 30 минут без активности
-const SESSION_CLEANUP_INTERVAL_MS = 60 * 1000; // проверка каждые 60 сек
+const SESSION_CLEANUP_INTERVAL_MS = 60 * 1000; // максимальный интервал проверки TTL
 
 const OAUTH2_SNAPSHOT_INTERVAL_MS = 30_000; // периодическая запись OAuth2-снапшота
 
@@ -37,6 +36,8 @@ interface SessionEntry {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
   lastActivity: number;
+  /** Открытые HTTP-ответы (SSE-стримы и длинные POST); пока > 0 — сессия активна. */
+  activeStreams: number;
 }
 
 /**
@@ -422,21 +423,55 @@ function createBearerMiddleware(config: Config, oauth2Service: OAuth2Service | n
 
 // --- Основной HTTP-сервер ---
 
-export async function runHttpServer(config: Config): Promise<void> {
+/**
+ * Экземпляр приложения: express app + освобождение ресурсов (таймеры,
+ * сессии, снапшот OAuth2). Выделен из runHttpServer для тестируемости.
+ */
+export interface HttpAppHandle {
+  app: express.Express;
+  dispose: () => Promise<void>;
+}
+
+export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
   // Состояние сервера — инкапсулировано в функции
   const sessions = new Map<string, SessionEntry>();
 
-  function touchSession(id: string): void {
-    const entry = sessions.get(id);
-    if (entry) entry.lastActivity = Date.now();
+  /**
+   * Регистрирует HTTP-ответ как активность сессии на всё время его жизни.
+   * Пока ответ открыт (SSE-стрим, длинный tool call) — сессия не истекает;
+   * при закрытии активность обновляется, и TTL отсчитывается заново.
+   */
+  function trackResponse(entry: SessionEntry, res: Response): void {
+    entry.lastActivity = Date.now();
+    entry.activeStreams++;
+    res.once("close", () => {
+      entry.activeStreams--;
+      entry.lastActivity = Date.now();
+    });
   }
 
+  /** Ответ в формате JSON-RPC, совпадающий с ошибками SDK-транспорта. */
+  function jsonRpcError(res: Response, status: number, code: number, message: string): void {
+    res.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
+  }
+
+  // Интервал проверки TTL: не реже четверти TTL (важно для коротких TTL),
+  // но не чаще предела в 60 сек
+  const sweepIntervalMs = Math.min(
+    SESSION_CLEANUP_INTERVAL_MS,
+    Math.max(Math.floor(config.sessionTtlMs / 4), 20),
+  );
   const sessionCleanupTimer = setInterval(() => {
     const now = Date.now();
     let cleaned = 0;
 
     for (const [id, entry] of sessions) {
-      if (now - entry.lastActivity > SESSION_TTL_MS) {
+      if (entry.activeStreams > 0) {
+        // Живой SSE-стрим или незавершённый запрос — сессия активна
+        entry.lastActivity = now;
+        continue;
+      }
+      if (now - entry.lastActivity > config.sessionTtlMs) {
         entry.transport.close().catch(() => {});
         sessions.delete(id);
         cleaned++;
@@ -446,7 +481,7 @@ export async function runHttpServer(config: Config): Promise<void> {
     if (cleaned > 0) {
       logger.debug(`Очищено устаревших сессий: ${cleaned}`);
     }
-  }, SESSION_CLEANUP_INTERVAL_MS);
+  }, sweepIntervalMs);
 
   const app = express();
 
@@ -569,15 +604,17 @@ export async function runHttpServer(config: Config): Promise<void> {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     // Существующая сессия
-    if (sessionId && sessions.has(sessionId)) {
-      touchSession(sessionId);
-      const entry = sessions.get(sessionId)!;
-      await entry.transport.handleRequest(req, res, req.body);
+    const existing = sessionId ? sessions.get(sessionId) : undefined;
+    if (existing) {
+      trackResponse(existing, res);
+      await existing.transport.handleRequest(req, res, req.body);
       return;
     }
 
-    // Новая сессия (только при initialize)
-    if (!sessionId && isInitializeRequest(req.body)) {
+    // Новая сессия: initialize без session id (спецификация) или с
+    // устаревшим session id — лояльное восстановление после рестарта
+    // сервера или истечения TTL, чтобы клиент не застревал на ошибке
+    if (isInitializeRequest(req.body)) {
       const creds = getSessionCredentials(req);
 
       // Health check — если 1С недоступна, сессия не создается
@@ -605,7 +642,7 @@ export async function runHttpServer(config: Config): Promise<void> {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id: string) => {
-          sessions.set(id, { transport, server, lastActivity: Date.now() });
+          sessions.set(id, { transport, server, lastActivity: Date.now(), activeStreams: 0 });
           logger.debug(`Streamable HTTP сессия создана: ${id}`);
         },
       });
@@ -622,34 +659,37 @@ export async function runHttpServer(config: Config): Promise<void> {
       return;
     }
 
-    res.status(400).json({
-      jsonrpc: "2.0",
-      error: { code: -32000, message: "Invalid session" },
-      id: null,
-    });
+    if (sessionId) {
+      // Неизвестная/истёкшая сессия: 404 по спецификации MCP — клиент
+      // обязан прозрачно начать новую сессию через InitializeRequest
+      jsonRpcError(res, 404, -32001, "Session not found");
+      return;
+    }
+
+    jsonRpcError(res, 400, -32000, "Bad Request: Mcp-Session-Id header is required");
   });
 
   app.get("/mcp", async (req: Request, res: Response) => {
-    const sessionId = req.headers["mcp-session-id"] as string;
-    if (sessionId && sessions.has(sessionId)) {
-      touchSession(sessionId);
-      const entry = sessions.get(sessionId)!;
-      await entry.transport.handleRequest(req, res);
-    } else {
-      res.status(400).send("Invalid session");
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    const entry = sessionId ? sessions.get(sessionId) : undefined;
+    if (!entry) {
+      jsonRpcError(res, 404, -32001, "Session not found");
+      return;
     }
+    trackResponse(entry, res);
+    await entry.transport.handleRequest(req, res);
   });
 
   app.delete("/mcp", async (req: Request, res: Response) => {
-    const sessionId = req.headers["mcp-session-id"] as string;
-    if (sessionId && sessions.has(sessionId)) {
-      const entry = sessions.get(sessionId)!;
-      await entry.transport.close();
-      sessions.delete(sessionId);
-      res.status(200).end();
-    } else {
-      res.status(400).send("Invalid session");
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    const entry = sessionId ? sessions.get(sessionId) : undefined;
+    if (!sessionId || !entry) {
+      jsonRpcError(res, 404, -32001, "Session not found");
+      return;
     }
+    await entry.transport.close();
+    sessions.delete(sessionId);
+    res.status(200).end();
   });
 
   // =============================================
@@ -1057,16 +1097,9 @@ export async function runHttpServer(config: Config): Promise<void> {
     });
   });
 
-  // --- Запуск сервера ---
+  // --- Освобождение ресурсов (graceful shutdown / тесты) ---
 
-  const httpServer = createServer(app);
-  httpServer.listen(config.port, config.host, () => {
-    logger.info(`HTTP-сервер запущен на ${config.host}:${config.port}`);
-  });
-
-  // Graceful shutdown — ожидаем завершения активных сессий
-  const shutdown = async () => {
-    logger.info("Остановка HTTP-сервера...");
+  const dispose = async (): Promise<void> => {
     clearInterval(sessionCleanupTimer);
     authRateLimiter?.stopCleanupTask();
     if (oauth2Store) {
@@ -1085,7 +1118,23 @@ export async function runHttpServer(config: Config): Promise<void> {
       Array.from(sessions.values()).map((entry) => entry.transport.close().catch(() => {})),
     );
     sessions.clear();
+  };
 
+  return { app, dispose };
+}
+
+export async function runHttpServer(config: Config): Promise<void> {
+  const { app, dispose } = await createHttpApp(config);
+
+  const httpServer = createServer(app);
+  httpServer.listen(config.port, config.host, () => {
+    logger.info(`HTTP-сервер запущен на ${config.host}:${config.port}`);
+  });
+
+  // Graceful shutdown — ожидаем завершения активных сессий
+  const shutdown = async () => {
+    logger.info("Остановка HTTP-сервера...");
+    await dispose();
     // Закрываем HTTP-сервер (перестаем принимать новые соединения)
     httpServer.close();
   };

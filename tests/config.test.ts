@@ -26,6 +26,7 @@ const MCP_KEYS = [
   "MCP_AUTH_RATE_LIMIT_BLOCK_MS",
   "MCP_AUTH_RATE_LIMIT_BY_IP",
   "MCP_TRUST_PROXY",
+  "MCP_SESSION_TTL_MS",
 ];
 
 describe("getConfig", () => {
@@ -162,6 +163,23 @@ describe("getConfig", () => {
   it("отвергает отрицательный лимит попыток", () => {
     process.env.MCP_ONEC_URL = "http://localhost/base";
     process.env.MCP_AUTH_RATE_LIMIT_MAX_ATTEMPTS = "-1";
+    expect(() => getConfig()).toThrow();
+  });
+
+  it("sessionTtlMs по умолчанию 24 часа", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    expect(getConfig().sessionTtlMs).toBe(86_400_000);
+  });
+
+  it("читает MCP_SESSION_TTL_MS из окружения", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_SESSION_TTL_MS = "3600000";
+    expect(getConfig().sessionTtlMs).toBe(3_600_000);
+  });
+
+  it("отвергает MCP_SESSION_TTL_MS меньше 1000 мс", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_SESSION_TTL_MS = "500";
     expect(() => getConfig()).toThrow();
   });
 

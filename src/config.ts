@@ -23,6 +23,11 @@ const configSchema = z.object({
   // Настройки MCP
   serverName: z.string().default("Управление IT-отделом 8 MCP"),
   serverVersion: z.string().default(PACKAGE_VERSION),
+  /**
+   * TTL HTTP-сессии /mcp без активности (мс). Сессия с открытым SSE-стримом
+   * считается активной и по TTL не вычищается.
+   */
+  sessionTtlMs: z.coerce.number().int().min(1000).default(86_400_000),
 
   // Настройки логирования
   logLevel: z.enum(["DEBUG", "INFO", "WARNING", "ERROR"]).default("INFO"),
@@ -107,6 +112,7 @@ export function getConfig(): Config {
     onecTimeout: env("ONEC_TIMEOUT"),
     serverName: env("SERVER_NAME"),
     serverVersion: undefined,
+    sessionTtlMs: env("SESSION_TTL_MS"),
     logLevel: env("LOG_LEVEL"),
     corsOrigins,
     authMode: env("AUTH_MODE"),
