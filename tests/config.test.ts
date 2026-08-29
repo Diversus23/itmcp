@@ -29,6 +29,7 @@ const MCP_KEYS = [
   "MCP_SESSION_TTL_MS",
   "MCP_MAX_SESSIONS",
   "MCP_SAVE_FILE_DIR",
+  "MCP_ALLOWED_HOSTS",
 ];
 
 describe("getConfig", () => {
@@ -211,6 +212,23 @@ describe("getConfig", () => {
     process.env.MCP_ONEC_URL = "http://localhost/base";
     process.env.MCP_SAVE_FILE_DIR = "/srv/mcp-files";
     expect(getConfig().saveFileDir).toBe("/srv/mcp-files");
+  });
+
+  it("allowedHosts по умолчанию пуст (проверка Host отключена)", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    expect(getConfig().allowedHosts).toEqual([]);
+  });
+
+  it("парсит MCP_ALLOWED_HOSTS как JSON-массив", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_ALLOWED_HOSTS = '["localhost","mcp.example.com"]';
+    expect(getConfig().allowedHosts).toEqual(["localhost", "mcp.example.com"]);
+  });
+
+  it("оборачивает не-JSON значение MCP_ALLOWED_HOSTS в массив из одного хоста", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_ALLOWED_HOSTS = "mcp.example.com";
+    expect(getConfig().allowedHosts).toEqual(["mcp.example.com"]);
   });
 
   it("trustProxy по умолчанию не задан", () => {

@@ -45,6 +45,12 @@ const configSchema = z.object({
 
   // Настройки безопасности
   corsOrigins: z.array(z.string()).default(["*"]),
+  /**
+   * Белый список значений Host-заголовка (без порта) — защита от DNS
+   * rebinding для локальных запусков без авторизации. Пустой список —
+   * проверка отключена.
+   */
+  allowedHosts: z.array(z.string()).default([]),
 
   // Настройки авторизации OAuth2
   authMode: z.enum(["none", "oauth2"]).default("none"),
@@ -113,6 +119,16 @@ export function getConfig(): Config {
     }
   }
 
+  let allowedHosts: string[] = [];
+  const hostsRaw = env("ALLOWED_HOSTS");
+  if (hostsRaw) {
+    try {
+      allowedHosts = JSON.parse(hostsRaw);
+    } catch {
+      allowedHosts = [hostsRaw];
+    }
+  }
+
   const raw = {
     host: env("HOST"),
     port: env("PORT"),
@@ -128,6 +144,7 @@ export function getConfig(): Config {
     saveFileDir: env("SAVE_FILE_DIR"),
     logLevel: env("LOG_LEVEL"),
     corsOrigins,
+    allowedHosts,
     authMode: env("AUTH_MODE"),
     publicUrl: env("PUBLIC_URL"),
     oauth2CodeTtl: env("OAUTH2_CODE_TTL"),

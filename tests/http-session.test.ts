@@ -7,10 +7,11 @@
  * удерживает сессию от вычистки по TTL.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createServer, type Server } from "node:http";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createHttpApp, type HttpAppHandle } from "../src/http-server.js";
+import { setLogLevel } from "../src/logger.js";
 import type { Config } from "../src/config.js";
 
 // --- Мок 1С ---
@@ -54,8 +55,52 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     sessionTtlMs: SESSION_TTL_MS,
     maxSessions: 1000,
     saveFileDir: undefined,
+    allowedHosts: [],
     ...overrides,
   };
+}
+
+/** Поднимает отдельный экземпляр приложения на эфемерном порту. */
+async function startApp(
+  overrides: Partial<Config>,
+): Promise<{ handle: HttpAppHandle; server: Server; port: number; stop: () => Promise<void> }> {
+  const h = await createHttpApp(makeConfig(overrides));
+  const srv = createServer(h.app);
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const port = (srv.address() as AddressInfo).port;
+  return {
+    handle: h,
+    server: srv,
+    port,
+    stop: async () => {
+      await h.dispose();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    },
+  };
+}
+
+/** HTTP-запрос с полным контролем заголовков (fetch запрещает host/origin). */
+function rawRequest(
+  port: number,
+  options: { path: string; method?: string; headers?: Record<string, string> },
+): Promise<{ status: number; headers: Record<string, string | string[] | undefined> }> {
+  return new Promise((resolvePromise, reject) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path: options.path,
+        method: options.method ?? "GET",
+        headers: options.headers,
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolvePromise({ status: res.statusCode ?? 0, headers: res.headers }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 let healthHits = 0;
@@ -347,6 +392,106 @@ describe("save_file — ограничение каталога записи", (
     expect(msg.result?.isError).toBe(false);
     const payload = JSON.parse(msg.result?.content?.[0]?.text ?? "{}") as { path?: string };
     expect(payload.path).toContain("mcp-files");
+  });
+});
+
+describe("CORS", () => {
+  it("отдаёт Access-Control-Allow-Origin только разрешённому origin", async () => {
+    const app2 = await startApp({ corsOrigins: ["https://good.example"] });
+    try {
+      const good = await rawRequest(app2.port, {
+        path: "/info",
+        headers: { origin: "https://good.example" },
+      });
+      expect(good.headers["access-control-allow-origin"]).toBe("https://good.example");
+      expect(good.headers["access-control-allow-credentials"]).toBe("true");
+
+      const evil = await rawRequest(app2.port, {
+        path: "/info",
+        headers: { origin: "https://evil.example" },
+      });
+      expect(evil.headers["access-control-allow-origin"]).toBeUndefined();
+      expect(evil.headers["access-control-allow-credentials"]).toBeUndefined();
+    } finally {
+      await app2.stop();
+    }
+  });
+
+  it("wildcard отдаёт * без credentials", async () => {
+    const res = await rawRequest((appServer.address() as AddressInfo).port, {
+      path: "/info",
+      headers: { origin: "https://anything.example" },
+    });
+    expect(res.headers["access-control-allow-origin"]).toBe("*");
+  });
+});
+
+describe("защита от DNS rebinding (MCP_ALLOWED_HOSTS)", () => {
+  it("запрос с чужим Host отклоняется 403, разрешённый проходит", async () => {
+    const app2 = await startApp({ allowedHosts: ["localhost"] });
+    try {
+      const ok = await rawRequest(app2.port, {
+        path: "/info",
+        headers: { host: "localhost:8000" },
+      });
+      expect(ok.status).toBe(200);
+
+      const rebind = await rawRequest(app2.port, {
+        path: "/info",
+        headers: { host: "attacker.example" },
+      });
+      expect(rebind.status).toBe(403);
+    } finally {
+      await app2.stop();
+    }
+  });
+
+  it("без настройки проверка Host отключена", async () => {
+    const res = await rawRequest((appServer.address() as AddressInfo).port, {
+      path: "/info",
+      headers: { host: "anything.example" },
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("request-логирование", () => {
+  it("ответы с ошибкой логируются на WARNING", async () => {
+    setLogLevel("WARNING"); // setup.ts глушит тестовый прогон уровнем ERROR
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const res = await fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: ACCEPT,
+          "mcp-session-id": "99999999-9999-9999-9999-999999999999",
+        },
+        body: toolsListBody(),
+      });
+      expect(res.status).toBe(404);
+      await sleep(100); // лог пишется по закрытию ответа
+      const lines = spy.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.includes("WARNING") && l.includes("POST /mcp 404"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+      setLogLevel("ERROR");
+    }
+  });
+
+  it("успешные запросы логируются на DEBUG", async () => {
+    setLogLevel("DEBUG");
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const res = await fetch(`${baseUrl}/info`);
+      expect(res.status).toBe(200);
+      await sleep(100);
+      const lines = spy.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.includes("DEBUG") && l.includes("GET /info 200"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+      setLogLevel("ERROR");
+    }
   });
 });
 

@@ -493,6 +493,53 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
     app.set("trust proxy", config.trustProxy);
   }
 
+  // Защита от DNS rebinding: браузер жертвы может обратиться к локальному
+  // серверу через домен атакующего — тогда Host не совпадёт с белым списком
+  if (config.allowedHosts.length > 0) {
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      const rawHost = req.headers.host ?? "";
+      let hostname = rawHost;
+      try {
+        hostname = new URL(`http://${rawHost}`).hostname;
+      } catch {
+        // некорректный Host не совпадёт ни с одним разрешённым
+      }
+      if (!config.allowedHosts.includes(hostname)) {
+        res.status(403).json({
+          error: "forbidden",
+          error_description: "Host header is not in the allowed list",
+        });
+        return;
+      }
+      next();
+    });
+  }
+
+  // Request-логирование: успешные запросы на DEBUG, ошибки на WARNING —
+  // чтобы инциденты (404 Session not found и т.п.) были видны в логах.
+  // finish — обычное завершение ответа, close — обрыв соединения (SSE);
+  // на keep-alive сокетах close может прийти с большой задержкой
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const start = Date.now();
+    let logged = false;
+    const logRequest = () => {
+      if (logged) return;
+      logged = true;
+      const sid = req.headers["mcp-session-id"];
+      const line =
+        `${req.method} ${req.path} ${res.statusCode} ${Date.now() - start}ms ` +
+        `ip=${req.ip ?? "-"}${sid ? ` session=${String(sid)}` : ""}`;
+      if (res.statusCode >= 400) {
+        logger.warning(line);
+      } else {
+        logger.debug(line);
+      }
+    };
+    res.once("finish", logRequest);
+    res.once("close", logRequest);
+    next();
+  });
+
   // Большой лимит тела — только для /mcp (крупные tool calls). Остальным
   // эндпоинтам (OAuth-ручки и пр.) хватает 100kb: иначе неавторизованный
   // клиент мог бы исчерпывать память 50-мегабайтными телами на /token
@@ -511,10 +558,9 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
       if (requestOrigin && origins.includes(requestOrigin)) {
         res.set("Access-Control-Allow-Origin", requestOrigin);
         res.set("Access-Control-Allow-Credentials", "true");
-      } else if (origins.length > 0) {
-        res.set("Access-Control-Allow-Origin", origins[0]);
-        res.set("Access-Control-Allow-Credentials", "true");
+        res.set("Vary", "Origin");
       }
+      // Чужой или отсутствующий origin — CORS-заголовки не выставляются
     }
 
     res.set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
