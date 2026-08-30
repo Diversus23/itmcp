@@ -1,6 +1,6 @@
 {
   "name": "1c-mcp-proxy",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "MCP-прокси сервер для 1С:Предприятие",
   "type": "module",
   "main": "dist/index.js",
