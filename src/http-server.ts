@@ -583,6 +583,14 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
     oauth2Store = new OAuth2Store({
       persistencePath: config.oauth2StorePath,
       graceWindowMs: config.oauth2RefreshGraceMs,
+      // В лояльном режиме использованные refresh-токены храним, пока жив
+      // выданный при ротации access-токен: опоздавшая параллельная сессия
+      // (другое окно Claude Code с тем же файлом креденшилов) идемпотентно
+      // догоняется до актуальной пары вместо принудительной реавторизации.
+      // В строгом режиме — только grace-окно, дальше reuse = отзыв семьи.
+      consumedRetentionMs: config.oauth2RevokeOnReuse
+        ? config.oauth2RefreshGraceMs
+        : Math.max(config.oauth2RefreshGraceMs, config.oauth2AccessTtl * 1000),
     });
 
     // Восстанавливаем сохраненные токены до старта приема запросов —
@@ -595,11 +603,26 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
       config.oauth2CodeTtl,
       config.oauth2AccessTtl,
       config.oauth2RefreshTtl,
+      { revokeFamilyOnReuse: config.oauth2RevokeOnReuse },
     );
     oauth2Store.startCleanupTask(60_000);
     if (config.oauth2StorePath) {
       oauth2Store.startSnapshotTask(OAUTH2_SNAPSHOT_INTERVAL_MS);
       logger.info(`OAuth2 авторизация включена; снапшот: ${config.oauth2StorePath}`);
+      // Проба записи сразу при старте: если каталог снапшота недоступен
+      // (типично в Docker — bind-mount каталог, созданный root'ом, при
+      // процессе под пользователем node), молчаливый warning раз в 30 сек
+      // легко пропустить, а каждый рестарт будет разлогинивать всех клиентов.
+      try {
+        await oauth2Store.saveSnapshot();
+      } catch (e) {
+        logger.error(
+          `OAuth2-снапшот НЕ записывается (${formatError(e)}). ` +
+            `Токены не переживут перезапуск — все клиенты будут вынуждены переавторизоваться. ` +
+            `Проверьте права на каталог: в Docker выполните chown -R 1000:1000 на каталог тома ` +
+            `(${config.oauth2StorePath}).`,
+        );
+      }
     } else {
       logger.info("OAuth2 авторизация включена; персистентность отключена (in-memory)");
     }

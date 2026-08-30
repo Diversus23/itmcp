@@ -5,9 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OAuth2Service, OAuth2Store } from "../src/auth/oauth2.js";
 
-function makePair(graceWindowMs = 60_000) {
-  const store = new OAuth2Store({ graceWindowMs });
-  const svc = new OAuth2Service(store, 120, 3600, 1_209_600);
+function makePair(
+  graceWindowMs = 60_000,
+  options: { revokeFamilyOnReuse?: boolean; consumedRetentionMs?: number } = {},
+) {
+  const store = new OAuth2Store({
+    graceWindowMs,
+    consumedRetentionMs: options.consumedRetentionMs,
+  });
+  const svc = new OAuth2Service(store, 120, 3600, 1_209_600, {
+    revokeFamilyOnReuse: options.revokeFamilyOnReuse,
+  });
   return { store, svc };
 }
 
@@ -128,10 +136,86 @@ describe("OAuth2Service — refresh-ротация и grace-window", () => {
     expect(replay.tokens.refreshToken).toBe(first.tokens.refreshToken);
   });
 
-  it("повторное использование после grace-window отзывает всю семью токенов", () => {
+  it("повторное использование после grace-window в лояльном режиме идемпотентно отдаёт актуальную пару", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
-    const { svc } = makePair(1000);
+    const { svc } = makePair(1000, { consumedRetentionMs: 100_000 });
+    const initial = svc.generateTokensFromCredentials("user", "pass");
+
+    const first = svc.refreshTokens(initial.refreshToken);
+    expect(first.kind).toBe("ok");
+    if (first.kind !== "ok") return;
+
+    vi.setSystemTime(50_000); // сильно позже grace-window, но в пределах retention
+    const late = svc.refreshTokens(initial.refreshToken);
+    // Опоздавшая сессия (другое окно Claude Code) получает ту же актуальную
+    // пару, а не отказ — и продолжает работать без реавторизации
+    expect(late.kind).toBe("ok");
+    if (late.kind !== "ok") return;
+    expect(late.tokens.accessToken).toBe(first.tokens.accessToken);
+    expect(late.tokens.refreshToken).toBe(first.tokens.refreshToken);
+
+    // Семья не пострадала
+    expect(svc.validateAccessToken(first.tokens.accessToken)).toEqual({
+      login: "user",
+      password: "pass",
+    });
+  });
+
+  it("повторное использование старого токена из середины цепочки ротаций отдаёт хвост цепочки", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { svc } = makePair(1000, { consumedRetentionMs: 100_000 });
+    const initial = svc.generateTokensFromCredentials("user", "pass");
+
+    const first = svc.refreshTokens(initial.refreshToken);
+    expect(first.kind).toBe("ok");
+    if (first.kind !== "ok") return;
+
+    vi.setSystemTime(10_000);
+    const second = svc.refreshTokens(first.tokens.refreshToken);
+    expect(second.kind).toBe("ok");
+    if (second.kind !== "ok") return;
+
+    // Самый первый refresh-токен (две ротации назад) догоняет актуальную пару
+    vi.setSystemTime(20_000);
+    const late = svc.refreshTokens(initial.refreshToken);
+    expect(late.kind).toBe("ok");
+    if (late.kind !== "ok") return;
+    expect(late.tokens.accessToken).toBe(second.tokens.accessToken);
+    expect(late.tokens.refreshToken).toBe(second.tokens.refreshToken);
+  });
+
+  it("после истечения retention использованный токен вычищается и даёт invalid без отзыва семьи", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { store, svc } = makePair(1000, { consumedRetentionMs: 5000 });
+    const initial = svc.generateTokensFromCredentials("user", "pass");
+
+    const first = svc.refreshTokens(initial.refreshToken);
+    expect(first.kind).toBe("ok");
+    if (first.kind !== "ok") return;
+
+    // Периодическая очистка вычищает consumed-токен после retention
+    store.startCleanupTask(1000);
+    vi.advanceTimersByTime(10_000);
+    store.stopCleanupTask();
+
+    const late = svc.refreshTokens(initial.refreshToken);
+    expect(late.kind).toBe("invalid");
+
+    // Актуальная пара продолжает работать
+    expect(svc.validateAccessToken(first.tokens.accessToken)).toEqual({
+      login: "user",
+      password: "pass",
+    });
+    expect(svc.refreshTokens(first.tokens.refreshToken).kind).toBe("ok");
+  });
+
+  it("в строгом режиме (revokeFamilyOnReuse) повторное использование после grace-window отзывает всю семью", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { svc } = makePair(1000, { revokeFamilyOnReuse: true });
     const initial = svc.generateTokensFromCredentials("user", "pass");
 
     const first = svc.refreshTokens(initial.refreshToken);

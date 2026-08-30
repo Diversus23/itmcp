@@ -21,7 +21,7 @@ const logger = createLogger("oauth2");
 
 // --- Константы ---
 
-const DEFAULT_GRACE_WINDOW_MS = 60_000;
+const DEFAULT_GRACE_WINDOW_MS = 300_000;
 const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
 const DEFAULT_SNAPSHOT_INTERVAL_MS = 30_000;
 
@@ -90,6 +90,10 @@ export type RefreshClaim =
       kind: "consumed-replay-stale";
       login: string;
       family: string;
+      /** Хвост цепочки ротаций — если он ещё хранится (для лояльного режима). */
+      replacementAccessToken?: string;
+      replacementRefreshToken?: string;
+      sinceConsumedMs: number;
     }
   | {
       kind: "rotated";
@@ -103,6 +107,14 @@ export type RefreshClaim =
 export interface OAuth2StoreOptions {
   /** Окно идемпотентности при повторном использовании refresh-токена (мс). */
   graceWindowMs?: number;
+  /**
+   * Сколько хранить использованные (consumed) refresh-токены (мс). Пока
+   * запись хранится, опоздавший клиент может быть идемпотентно догнан до
+   * актуальной пары (лояльный режим) или пойман на reuse (строгий режим).
+   * По умолчанию равно graceWindowMs; значения меньше graceWindowMs
+   * повышаются до него.
+   */
+  consumedRetentionMs?: number;
   /** Путь к JSON-снапшоту для персистентности. Если не задан — только память. */
   persistencePath?: string;
 }
@@ -117,10 +129,15 @@ export class OAuth2Store {
   private dirty = false;
 
   readonly graceWindowMs: number;
+  readonly consumedRetentionMs: number;
   readonly persistencePath: string | undefined;
 
   constructor(options: OAuth2StoreOptions = {}) {
     this.graceWindowMs = options.graceWindowMs ?? DEFAULT_GRACE_WINDOW_MS;
+    this.consumedRetentionMs = Math.max(
+      options.consumedRetentionMs ?? this.graceWindowMs,
+      this.graceWindowMs,
+    );
     this.persistencePath = options.persistencePath;
   }
 
@@ -177,9 +194,9 @@ export class OAuth2Store {
       }
     }
     for (const [key, data] of this.refreshTokens) {
-      // Удаляем когда И сам токен истёк, И grace-окно после consume закрылось
+      // Удаляем когда сам токен истёк ЛИБО retention после consume закончился
       const consumedExpired =
-        data.consumedAt !== undefined && now - data.consumedAt > this.graceWindowMs;
+        data.consumedAt !== undefined && now - data.consumedAt > this.consumedRetentionMs;
       if (data.exp < now || consumedExpired) {
         this.refreshTokens.delete(key);
         refresh++;
@@ -271,17 +288,16 @@ export class OAuth2Store {
 
     if (data.consumedAt !== undefined) {
       const sinceConsumed = now - data.consumedAt;
-      if (
-        sinceConsumed <= this.graceWindowMs &&
-        data.replacementAccessToken &&
-        data.replacementRefreshToken
-      ) {
+      // Токен мог быть ротирован ещё раз (и не раз) другой сессией —
+      // догоняем до актуального хвоста цепочки ротаций.
+      const tail = this.followReplacementChain(data);
+      if (sinceConsumed <= this.graceWindowMs && tail) {
         return {
           kind: "consumed-replay-grace",
           login: data.login,
           family: data.family,
-          replacementAccessToken: data.replacementAccessToken,
-          replacementRefreshToken: data.replacementRefreshToken,
+          replacementAccessToken: tail.accessToken,
+          replacementRefreshToken: tail.refreshToken,
           sinceConsumedMs: sinceConsumed,
         };
       }
@@ -289,6 +305,9 @@ export class OAuth2Store {
         kind: "consumed-replay-stale",
         login: data.login,
         family: data.family,
+        replacementAccessToken: tail?.accessToken,
+        replacementRefreshToken: tail?.refreshToken,
+        sinceConsumedMs: sinceConsumed,
       };
     }
 
@@ -320,6 +339,35 @@ export class OAuth2Store {
       family: data.family,
       rotationCounter: data.rotationCounter + 1,
     };
+  }
+
+  /**
+   * Проходит по цепочке ротаций от использованного токена до актуального
+   * (не-consumed) хвоста. Возвращает последнюю пару токенов цепочки или
+   * undefined, если у записи нет replacement'ов.
+   */
+  private followReplacementChain(
+    data: RefreshTokenData,
+  ): { accessToken: string; refreshToken: string } | undefined {
+    if (!data.replacementAccessToken || !data.replacementRefreshToken) return undefined;
+    let accessToken = data.replacementAccessToken;
+    let refreshToken = data.replacementRefreshToken;
+    // Ограничитель на случай повреждённой цепочки (циклы невозможны при
+    // штатной ротации, но защищаемся от испорченного снапшота)
+    for (let hops = 0; hops < 1000; hops++) {
+      const next = this.refreshTokens.get(refreshToken);
+      if (
+        !next ||
+        next.consumedAt === undefined ||
+        !next.replacementAccessToken ||
+        !next.replacementRefreshToken
+      ) {
+        return { accessToken, refreshToken };
+      }
+      accessToken = next.replacementAccessToken;
+      refreshToken = next.replacementRefreshToken;
+    }
+    return { accessToken, refreshToken };
   }
 
   /**
@@ -365,7 +413,13 @@ export class OAuth2Store {
    */
   async saveSnapshot(): Promise<void> {
     if (!this.persistencePath) return;
-    if (this.snapshotInFlight) return this.snapshotInFlight;
+
+    // Если запись уже идёт — дожидаемся её и пишем заново: payload идущей
+    // записи мог быть сформирован ДО последних изменений (например, ротации
+    // прямо перед SIGTERM), и вернуть её промис значило бы потерять их.
+    while (this.snapshotInFlight) {
+      await this.snapshotInFlight.catch(() => {});
+    }
 
     const path = this.persistencePath;
     const tmpPath = `${path}.tmp`;
@@ -507,7 +561,7 @@ export class OAuth2Store {
       const [token, data] = entry;
       if (!data || typeof data.exp !== "number" || data.exp < now) continue;
       const consumedExpired =
-        data.consumedAt !== undefined && now - data.consumedAt > this.graceWindowMs;
+        data.consumedAt !== undefined && now - data.consumedAt > this.consumedRetentionMs;
       if (consumedExpired) continue;
       this.refreshTokens.set(token, data);
       loadedRefresh++;
@@ -523,13 +577,32 @@ export class OAuth2Store {
 export type RefreshResult =
   { kind: "ok"; tokens: IssuedTokens } | { kind: "invalid" } | { kind: "replay" };
 
+export interface OAuth2ServiceOptions {
+  /**
+   * Отзывать ли всю семью токенов при повторном использовании refresh-токена
+   * после grace-window (строгий режим RFC 6819 §5.2.2.3).
+   *
+   * По умолчанию ВЫКЛЮЧЕНО: реальные MCP-клиенты (Claude Code и т.п.) держат
+   * несколько параллельных сессий с общим файлом креденшилов, и опоздавший
+   * с ротацией процесс — штатная ситуация, а не атака. Отзыв семьи в этом
+   * случае разом разлогинивает ВСЕ сессии пользователя. В лояльном режиме
+   * опоздавший получает invalid_grant, а остальные сессии продолжают работать.
+   */
+  revokeFamilyOnReuse?: boolean;
+}
+
 export class OAuth2Service {
+  private readonly revokeFamilyOnReuse: boolean;
+
   constructor(
     private readonly store: OAuth2Store,
     private readonly codeTtl: number = 120,
     private readonly accessTtl: number = 3600,
     private readonly refreshTtl: number = 1209600,
-  ) {}
+    options: OAuth2ServiceOptions = {},
+  ) {
+    this.revokeFamilyOnReuse = options.revokeFamilyOnReuse ?? false;
+  }
 
   generatePrmDocument(publicUrl: string): Record<string, unknown> {
     const url = publicUrl.replace(/\/+$/, "");
@@ -658,34 +731,52 @@ export class OAuth2Service {
     }
 
     if (claim.kind === "consumed-replay-stale") {
+      if (this.revokeFamilyOnReuse) {
+        logger.warning(
+          `Refresh token replay после grace-window для ${claim.login} — отзыв семьи ${claim.family}`,
+        );
+        this.store.revokeFamily(claim.family);
+        return { kind: "replay" };
+      }
+      // Лояльный режим: опоздавшая сессия (другое окно Claude Code, ретрай
+      // после сна ноутбука) — штатная ситуация. Пока хвост цепочки ротаций
+      // жив, догоняем её до актуальной пары; семья не отзывается.
+      if (claim.replacementAccessToken && claim.replacementRefreshToken) {
+        const reply = this.idempotentReply(
+          claim.replacementAccessToken,
+          claim.replacementRefreshToken,
+        );
+        if (reply) {
+          logger.info(
+            `Refresh token использован повторно после grace-window (${Math.round(claim.sinceConsumedMs / 1000)}с) — опоздавшая сессия ${claim.login} догнана до актуальной пары`,
+          );
+          return reply;
+        }
+      }
       logger.warning(
-        `Refresh token replay после grace-window для ${claim.login} — отзыв семьи ${claim.family}`,
+        `Refresh token использован повторно после grace-window для ${claim.login} (family=${claim.family}), актуальной пары нет — отказ без отзыва семьи`,
       );
-      this.store.revokeFamily(claim.family);
-      return { kind: "replay" };
+      return { kind: "invalid" };
     }
 
     if (claim.kind === "consumed-replay-grace") {
       // Идемпотентность: отдаем уже выпущенные ранее токены
-      const accessData = this.store.getAccessToken(claim.replacementAccessToken);
-      if (!accessData) {
-        // Замещающий access уже истек — отзываем семью
-        this.store.revokeFamily(claim.family);
-        return { kind: "replay" };
+      const reply = this.idempotentReply(
+        claim.replacementAccessToken,
+        claim.replacementRefreshToken,
+      );
+      if (!reply) {
+        // Замещающий access уже истек
+        if (this.revokeFamilyOnReuse) {
+          this.store.revokeFamily(claim.family);
+          return { kind: "replay" };
+        }
+        return { kind: "invalid" };
       }
-      const expiresIn = Math.max(1, Math.floor((accessData.exp - Date.now()) / 1000));
       logger.info(
         `Refresh token использован повторно в grace-window (${claim.sinceConsumedMs}ms) — идемпотентный ответ для ${claim.login}`,
       );
-      return {
-        kind: "ok",
-        tokens: {
-          accessToken: claim.replacementAccessToken,
-          tokenType: "Bearer",
-          expiresIn,
-          refreshToken: claim.replacementRefreshToken,
-        },
-      };
+      return reply;
     }
 
     // claim.kind === "rotated"
@@ -700,6 +791,20 @@ export class OAuth2Service {
         expiresIn: this.accessTtl,
         refreshToken: candidateRefresh,
       },
+    };
+  }
+
+  /**
+   * Идемпотентный ответ ранее выпущенной парой: валиден, только пока жив
+   * её access-токен (expiresIn пересчитывается на остаток).
+   */
+  private idempotentReply(accessToken: string, refreshToken: string): RefreshResult | undefined {
+    const accessData = this.store.getAccessToken(accessToken);
+    if (!accessData) return undefined;
+    const expiresIn = Math.max(1, Math.floor((accessData.exp - Date.now()) / 1000));
+    return {
+      kind: "ok",
+      tokens: { accessToken, tokenType: "Bearer", expiresIn, refreshToken },
     };
   }
 

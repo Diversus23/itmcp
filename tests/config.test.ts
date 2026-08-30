@@ -21,6 +21,7 @@ const MCP_KEYS = [
   "MCP_OAUTH2_REFRESH_TTL",
   "MCP_OAUTH2_STORE_PATH",
   "MCP_OAUTH2_REFRESH_GRACE_MS",
+  "MCP_OAUTH2_REVOKE_ON_REUSE",
   "MCP_AUTH_RATE_LIMIT_MAX_ATTEMPTS",
   "MCP_AUTH_RATE_LIMIT_WINDOW_MS",
   "MCP_AUTH_RATE_LIMIT_BLOCK_MS",
@@ -70,7 +71,20 @@ describe("getConfig", () => {
     expect(cfg.logLevel).toBe("INFO");
     expect(cfg.corsOrigins).toEqual(["*"]);
     expect(cfg.serverVersion).toBe(PACKAGE_VERSION);
-    expect(cfg.oauth2RefreshGraceMs).toBe(60_000);
+    expect(cfg.oauth2RefreshGraceMs).toBe(300_000);
+    expect(cfg.oauth2RevokeOnReuse).toBe(false);
+  });
+
+  it("включает строгий режим отзыва семьи через MCP_OAUTH2_REVOKE_ON_REUSE", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_OAUTH2_REVOKE_ON_REUSE = "true";
+    expect(getConfig().oauth2RevokeOnReuse).toBe(true);
+  });
+
+  it("трактует MCP_OAUTH2_REVOKE_ON_REUSE=false как выключенный строгий режим", () => {
+    process.env.MCP_ONEC_URL = "http://localhost/base";
+    process.env.MCP_OAUTH2_REVOKE_ON_REUSE = "false";
+    expect(getConfig().oauth2RevokeOnReuse).toBe(false);
   });
 
   it("приводит порт из строки к числу", () => {

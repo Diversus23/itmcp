@@ -61,7 +61,17 @@ const configSchema = z.object({
   /** Путь к JSON-снапшоту OAuth2-токенов; если не задан — токены только в памяти. */
   oauth2StorePath: z.string().optional(),
   /** Окно идемпотентности при ротации refresh-токена (мс). */
-  oauth2RefreshGraceMs: z.coerce.number().int().min(0).default(60_000),
+  oauth2RefreshGraceMs: z.coerce.number().int().min(0).default(300_000),
+  /**
+   * Строгий режим RFC 6819: отзывать всю семью токенов при повторном
+   * использовании refresh-токена после grace-window. По умолчанию выключен —
+   * MCP-клиенты с несколькими параллельными сессиями (Claude Code) штатно
+   * опаздывают с ротацией, и отзыв семьи разлогинивает все сессии разом.
+   */
+  oauth2RevokeOnReuse: z
+    .string()
+    .optional()
+    .transform((v) => v !== undefined && ["true", "1", "yes", "on"].includes(v.toLowerCase())),
 
   // Защита от перебора паролей (rate limiting на /authorize и /token)
   /** Неудачных попыток до блокировки; 0 — отключить rate limiting. */
@@ -152,6 +162,7 @@ export function getConfig(): Config {
     oauth2RefreshTtl: env("OAUTH2_REFRESH_TTL"),
     oauth2StorePath: env("OAUTH2_STORE_PATH"),
     oauth2RefreshGraceMs: env("OAUTH2_REFRESH_GRACE_MS"),
+    oauth2RevokeOnReuse: env("OAUTH2_REVOKE_ON_REUSE"),
     authRateLimitMaxAttempts: env("AUTH_RATE_LIMIT_MAX_ATTEMPTS"),
     authRateLimitWindowMs: env("AUTH_RATE_LIMIT_WINDOW_MS"),
     authRateLimitBlockMs: env("AUTH_RATE_LIMIT_BLOCK_MS"),
