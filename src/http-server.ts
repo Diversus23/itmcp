@@ -15,7 +15,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMCPProxyServer, prefetchInstructions } from "./mcp-proxy.js";
-import { OneCClient } from "./onec-client.js";
+import { OneCClient, OneCHttpError, OneCRequestError, formatOneCError } from "./onec-client.js";
 import { AuthRateLimiter, OAuth2Service, OAuth2Store } from "./auth/index.js";
 import type { Config } from "./config.js";
 import { createLogger, formatError } from "./logger.js";
@@ -69,6 +69,13 @@ interface CredentialValidationResult {
   valid: boolean;
   error?: "auth" | "connection";
   details?: string;
+  /** Вероятная причина и что проверить (только для error === "connection") */
+  hint?: string;
+}
+
+/** Текст сбоя для пользователя: сводка и подсказка одной строкой. */
+function describeFailure(result: CredentialValidationResult): string {
+  return [result.details, result.hint].filter(Boolean).join(". ");
 }
 
 /**
@@ -95,15 +102,18 @@ async function validateOneCCredentials(
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
 
-    // HTTP 401/403 — ошибка авторизации
-    if (/HTTP\s+(401|403)/i.test(msg)) {
+    // HTTP 401/403 — ошибка авторизации. Решаем по коду статуса, а не по
+    // тексту: в сообщении теперь есть фрагмент тела ответа 1С
+    if (e instanceof OneCHttpError && (e.statusCode === 401 || e.statusCode === 403)) {
       logger.warning(`Ошибка авторизации 1С для пользователя ${username}: ${msg}`);
       return { valid: false, error: "auth", details: msg };
     }
 
-    // Всё остальное — проблема подключения
+    // Всё остальное — проблема подключения. Наружу уходит краткая сводка, полные
+    // подробности (путь, URL веб-сервера) клиент 1С уже записал в лог
     logger.error(`Ошибка подключения к 1С при валидации: ${msg}`);
-    return { valid: false, error: "connection", details: msg };
+    const hint = e instanceof OneCRequestError ? e.hint : undefined;
+    return { valid: false, error: "connection", details: msg, hint };
   } finally {
     await client.close();
   }
@@ -708,7 +718,7 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
         logger.error(`Не удалось создать MCP-сессию (1С недоступна): ${check.details ?? ""}`);
         res.status(503).json({
           jsonrpc: "2.0",
-          error: { code: -32000, message: `1C service unavailable: ${check.details ?? ""}` },
+          error: { code: -32000, message: `1C service unavailable: ${describeFailure(check)}` },
           id: null,
         });
         return;
@@ -732,7 +742,7 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
         logger.error("Не удалось создать MCP-сессию (1С недоступна)", e);
         res.status(503).json({
           jsonrpc: "2.0",
-          error: { code: -32000, message: `1C service unavailable: ${formatError(e)}` },
+          error: { code: -32000, message: `1C service unavailable: ${formatOneCError(e)}` },
           id: null,
         });
         return;
@@ -1026,7 +1036,9 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
             .send(
               renderErrorPage(
                 "Ошибка подключения к 1С",
-                "Не удалось подключиться к серверу 1С",
+                result.hint
+                  ? `Не удалось подключиться к серверу 1С. ${result.hint}`
+                  : "Не удалось подключиться к серверу 1С",
                 config,
                 result.details ?? undefined,
               ),
@@ -1091,7 +1103,7 @@ export async function createHttpApp(config: Config): Promise<HttpAppHandle> {
           if (credResult.error === "connection") {
             res.status(503).json({
               error: "server_error",
-              error_description: `Unable to connect to 1C: ${credResult.details ?? "unknown error"}`,
+              error_description: `Unable to connect to 1C: ${describeFailure(credResult) || "unknown error"}`,
             });
           } else {
             limiter?.recordFailure(rlKeys);

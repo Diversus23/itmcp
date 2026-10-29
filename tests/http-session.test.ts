@@ -555,3 +555,200 @@ describe("/mcp — TTL сессий", () => {
     expect(res2.status).toBe(404);
   });
 });
+
+describe("недоступность 1С: подробный текст ошибки", () => {
+  const IIS_500 = `<html><head><title>IIS 10.0 — 500.0 — Internal Server Error</title></head><body>
+<h2>Подробные сведения об ошибке:</h2><table>
+<tr><th>Модуль</th><td>&nbsp;&nbsp;&nbsp;<code>IsapiModule</code></td></tr>
+<tr><th>Уведомление</th><td>&nbsp;&nbsp;&nbsp;<code>ExecuteRequestHandler</code></td></tr>
+<tr><th>Обработчик</th><td>&nbsp;&nbsp;&nbsp;<code>1C Web-service Extension</code></td></tr>
+<tr><th>Код ошибки</th><td>&nbsp;&nbsp;&nbsp;<code>0x80004005</code></td></tr>
+<tr><th>Физический путь</th><td>&nbsp;&nbsp;&nbsp;C:/inetpub/wwwroot/tracker/hs/mcp/health</td></tr>
+<tr><th>Метод входа</th><td>&nbsp;&nbsp;&nbsp;Анонимная</td></tr>
+</table></body></html>`;
+  const SUMMARY = "HTTP 500: IsapiModule / 1C Web-service Extension / 0x80004005";
+
+  let failingStatus = 500;
+  let failingServer: Server;
+  let failingUrl: string;
+
+  beforeAll(async () => {
+    failingServer = createServer((req, res) => {
+      req.resume();
+      res.statusCode = failingStatus;
+      res.setHeader("content-type", failingStatus === 500 ? "text/html" : "text/plain");
+      res.end(failingStatus === 500 ? IIS_500 : "");
+    });
+    await new Promise<void>((resolve) => failingServer.listen(0, "127.0.0.1", resolve));
+    failingUrl = `http://127.0.0.1:${(failingServer.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => failingServer.close(() => resolve()));
+  });
+
+  it("initialize: 503 с модулем, обработчиком и кодом ошибки IIS, без путей", async () => {
+    failingStatus = 500;
+    const app = await startApp({ onecUrl: failingUrl });
+    try {
+      const res = await fetch(`http://127.0.0.1:${app.port}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT },
+        body: initializeBody(),
+      });
+      expect(res.status).toBe(503);
+      const text = await res.text();
+      const body = JSON.parse(text) as { error: { code: number; message: string } };
+      expect(body.error.message).toContain(
+        `1C service unavailable: ${SUMMARY}. Вероятно, информационную базу 1С необходимо опубликовать на веб-сервере`,
+      );
+      expect(text).not.toMatch(/inetpub|127\.0\.0\.1/);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("initialize: ответ 401 от 1С остаётся ошибкой авторизации, а не недоступностью", async () => {
+    failingStatus = 401;
+    const app = await startApp({ onecUrl: failingUrl });
+    try {
+      const res = await fetch(`http://127.0.0.1:${app.port}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT },
+        body: initializeBody(),
+      });
+      expect(res.status).toBe(401);
+      expect(res.headers.get("www-authenticate")).toContain("invalid_token");
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("initialize: текст «HTTP 401» в теле ответа 502 не превращает сбой в ошибку авторизации", async () => {
+    const proxyServer = createServer((req, res) => {
+      req.resume();
+      res.statusCode = 502;
+      res.setHeader("content-type", "text/plain");
+      res.end("backend answered HTTP 401");
+    });
+    await new Promise<void>((resolve) => proxyServer.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(proxyServer.address() as AddressInfo).port}`;
+    const app = await startApp({ onecUrl: url });
+    try {
+      const res = await fetch(`http://127.0.0.1:${app.port}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT },
+        body: initializeBody(),
+      });
+      expect(res.status).toBe(503);
+    } finally {
+      await app.stop();
+      await new Promise<void>((resolve) => proxyServer.close(() => resolve()));
+    }
+  });
+
+  it("страница входа OAuth2: сводка ошибки 1С видна, пути и адреса — нет", async () => {
+    failingStatus = 500;
+    const app = await startApp({
+      onecUrl: failingUrl,
+      authMode: "oauth2",
+      onecUsername: "",
+      onecPassword: "",
+    });
+    try {
+      const qs = new URLSearchParams({
+        redirect_uri: "http://localhost/cb",
+        code_challenge: "x".repeat(43),
+      });
+      const res = await fetch(`http://127.0.0.1:${app.port}/authorize?${qs.toString()}`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ username: "u", password: "p" }),
+      });
+      expect(res.status).toBe(503);
+      const html = await res.text();
+      expect(html).toContain("IsapiModule / 1C Web-service Extension / 0x80004005");
+      expect(html).toContain("необходимо опубликовать на веб-сервере");
+      expect(html).not.toMatch(/inetpub|127\.0\.0\.1/);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("initialize: отказ в соединении даёт код ошибки и подсказку про MCP_ONEC_URL", async () => {
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(closed.address() as AddressInfo).port}`;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+
+    const app = await startApp({ onecUrl: url });
+    try {
+      const res = await fetch(`http://127.0.0.1:${app.port}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT },
+        body: initializeBody(),
+      });
+      expect(res.status).toBe(503);
+      const text = await res.text();
+      const body = JSON.parse(text) as { error: { message: string } };
+      expect(body.error.message).toContain("ECONNREFUSED");
+      expect(body.error.message).toContain("MCP_ONEC_URL");
+      expect(text).not.toContain("127.0.0.1");
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("tools/call при сбое 1С возвращает сводку и подсказку без стека", async () => {
+    const half = createServer((req, res) => {
+      req.resume();
+      if (req.url?.endsWith("/health")) {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+      res.statusCode = 500;
+      res.setHeader("content-type", "text/html");
+      res.end(IIS_500);
+    });
+    await new Promise<void>((resolve) => half.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(half.address() as AddressInfo).port}`;
+    const app = await startApp({ onecUrl: url });
+    try {
+      const base = `http://127.0.0.1:${app.port}`;
+      const init = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT },
+        body: initializeBody(),
+      });
+      const sessionId = init.headers.get("mcp-session-id") as string;
+      await init.body?.cancel();
+
+      const res = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: ACCEPT,
+          "mcp-session-id": sessionId,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: { name: "get_task", arguments: {} },
+        }),
+      });
+      const msg = (await readSseResult(res)) as {
+        result: { isError: boolean; content: Array<{ text: string }> };
+      };
+      const text = msg.result.content[0]?.text ?? "";
+      expect(msg.result.isError).toBe(true);
+      expect(text).toContain(SUMMARY);
+      expect(text).toContain("необходимо опубликовать на веб-сервере");
+      expect(text).not.toMatch(/\n\s+at /);
+    } finally {
+      await app.stop();
+      await new Promise<void>((resolve) => half.close(() => resolve()));
+    }
+  });
+});

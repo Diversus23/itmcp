@@ -15,7 +15,7 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { OneCClient } from "./onec-client.js";
+import { OneCClient, formatOneCError } from "./onec-client.js";
 import type { Config } from "./config.js";
 import { createLogger, formatError } from "./logger.js";
 
@@ -213,7 +213,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
       logger.error(`Ошибка при вызове инструмента ${name}`, e);
       return {
         content: [
-          { type: "text" as const, text: `Ошибка выполнения инструмента: ${formatError(e)}` },
+          { type: "text" as const, text: `Ошибка выполнения инструмента: ${formatOneCError(e)}` },
         ],
         isError: true,
       };
@@ -239,7 +239,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
       logger.error(`Ошибка при чтении ресурса ${uri}`, e);
       return {
         contents: [
-          { uri, mimeType: "text/plain", text: `Ошибка чтения ресурса: ${formatError(e)}` },
+          { uri, mimeType: "text/plain", text: `Ошибка чтения ресурса: ${formatOneCError(e)}` },
         ],
       };
     }
@@ -262,7 +262,7 @@ export async function createMCPProxyServer(options: MCPProxyOptions): Promise<Mc
       return result;
     } catch (e) {
       logger.error(`Ошибка при получении промпта ${name}`, e);
-      return { description: `Ошибка получения промпта: ${formatError(e)}`, messages: [] };
+      return { description: `Ошибка получения промпта: ${formatOneCError(e)}`, messages: [] };
     }
   });
 

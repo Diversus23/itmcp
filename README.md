@@ -18,6 +18,8 @@
 - [Развертывание MCP-сервера на виртуальной машине](https://docs.softonit.ru/it/iskusstvennyy-intellekt/mcp/razvertyvanie-mcp-servera) — установка прокси на отдельной ВМ с Docker.
 - [Подключение AI-клиентов к MCP-серверу](https://docs.softonit.ru/it/iskusstvennyy-intellekt/mcp/podklyuchenie-ai-klientov) — настройка Claude Desktop, Cursor и Claude Code, в том числе с OAuth2-авторизацией.
 
+Для сопровождающих: [обновление и диагностика production](.docs/deploy-production.md).
+
 Ниже — техническая справка по самому прокси.
 
 ## Быстрый старт
